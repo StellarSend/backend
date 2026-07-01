@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  api:
+    build: .
+    ports: ["3000:3000"]
+    environment:
+      DATABASE_URL: postgres://stellarsend:password@db:5432/stellarsend
+      STELLAR_NETWORK: testnet
+    depends_on: [db]
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: stellarsend
+      POSTGRES_USER: stellarsend
+      POSTGRES_PASSWORD: password
+    volumes: [pgdata:/var/lib/postgresql/data]
+volumes:
+  pgdata:

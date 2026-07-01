@@ -1,0 +1,4 @@
+# Override the parent workspace's wasm32 default target.
+# The backend is a native server binary — always build for the host.
+[build]
+target = "x86_64-apple-darwin"
