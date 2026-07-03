@@ -63,12 +63,13 @@ pub async fn get_escrow(
     Ok(Json(json!({ "success": true, "data": escrow })))
 }
 
-/// POST /api/escrows/:id/release
+/// POST /api/escrows/:id/release/build
 ///
-/// Releases escrowed funds to the beneficiary. Allowed once `unlock_time`
-/// has passed (beneficiary) or at any time (arbiter) — validated against
-/// the roles recorded on the escrow, then relayed on-chain via the keeper.
-pub async fn release_escrow(
+/// Builds an unsigned `release_escrow` invocation sourced from the calling
+/// party's own account (`req.account`), for the client to sign with its own
+/// wallet — the on-chain call requires the actual beneficiary/arbiter
+/// signature (`caller.require_auth()`), so this cannot be keeper-executed.
+pub async fn build_release_escrow(
     State(state): State<Arc<AppState>>,
     _auth: AuthUser,
     Path(id): Path<Uuid>,
@@ -77,28 +78,39 @@ pub async fn release_escrow(
     let svc = EscrowService::new(state.pool.clone());
     let stellar = StellarService::new(&state.config.horizon_url);
     let soroban = SorobanService::new(&state.config.soroban_rpc_url);
+
+    let xdr = svc
+        .build_action_tx(&state.config, &stellar, &soroban, id, EscrowAction::Release, &req)
+        .await?;
+
+    Ok(Json(json!({ "success": true, "data": { "xdr": xdr } })))
+}
+
+/// POST /api/escrows/:id/release
+///
+/// Relays a client-signed `release_escrow` envelope (from the `/release/build`
+/// step) and records the resulting on-chain state.
+pub async fn release_escrow(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SignedActionRequest>,
+) -> AppResult<Json<Value>> {
+    let svc = EscrowService::new(state.pool.clone());
+    let soroban = SorobanService::new(&state.config.soroban_rpc_url);
     let tx_svc = TransactionService::new(state.pool.clone());
 
     let escrow = svc
-        .execute_action(
-            &state.config,
-            &stellar,
-            &soroban,
-            &tx_svc,
-            id,
-            EscrowAction::Release,
-            &req,
-        )
+        .submit_signed_action(&soroban, &tx_svc, id, EscrowAction::Release, &req.signed_xdr)
         .await?;
 
     Ok(Json(json!({ "success": true, "data": escrow })))
 }
 
-/// POST /api/escrows/:id/refund
+/// POST /api/escrows/:id/refund/build
 ///
-/// Returns escrowed funds to the depositor. Allowed once `unlock_time` has
-/// passed (depositor) or at any time (arbiter).
-pub async fn refund_escrow(
+/// Same as `/release/build`, for `refund_escrow`.
+pub async fn build_refund_escrow(
     State(state): State<Arc<AppState>>,
     _auth: AuthUser,
     Path(id): Path<Uuid>,
@@ -107,19 +119,36 @@ pub async fn refund_escrow(
     let svc = EscrowService::new(state.pool.clone());
     let stellar = StellarService::new(&state.config.horizon_url);
     let soroban = SorobanService::new(&state.config.soroban_rpc_url);
+
+    let xdr = svc
+        .build_action_tx(&state.config, &stellar, &soroban, id, EscrowAction::Refund, &req)
+        .await?;
+
+    Ok(Json(json!({ "success": true, "data": { "xdr": xdr } })))
+}
+
+/// POST /api/escrows/:id/refund
+///
+/// Relays a client-signed `refund_escrow` envelope and records the result.
+pub async fn refund_escrow(
+    State(state): State<Arc<AppState>>,
+    _auth: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SignedActionRequest>,
+) -> AppResult<Json<Value>> {
+    let svc = EscrowService::new(state.pool.clone());
+    let soroban = SorobanService::new(&state.config.soroban_rpc_url);
     let tx_svc = TransactionService::new(state.pool.clone());
 
     let escrow = svc
-        .execute_action(
-            &state.config,
-            &stellar,
-            &soroban,
-            &tx_svc,
-            id,
-            EscrowAction::Refund,
-            &req,
-        )
+        .submit_signed_action(&soroban, &tx_svc, id, EscrowAction::Refund, &req.signed_xdr)
         .await?;
 
     Ok(Json(json!({ "success": true, "data": escrow })))
+}
+
+/// Request body for POST /api/escrows/:id/release and /refund.
+#[derive(Debug, serde::Deserialize)]
+pub struct SignedActionRequest {
+    pub signed_xdr: String,
 }

@@ -75,7 +75,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(escrows::list_escrows).post(escrows::create_escrow),
         )
         .route("/api/escrows/:id", get(escrows::get_escrow))
+        .route("/api/escrows/:id/release/build", post(escrows::build_release_escrow))
         .route("/api/escrows/:id/release", post(escrows::release_escrow))
+        .route("/api/escrows/:id/refund/build", post(escrows::build_refund_escrow))
         .route("/api/escrows/:id/refund", post(escrows::refund_escrow))
         // ── Keeper (manual trigger for the recurring-payment background job) ─
         .route("/api/keeper/run-subscriptions", post(keeper::run_subscriptions))

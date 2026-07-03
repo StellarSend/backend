@@ -7,10 +7,10 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use stellar_xdr::curr::{
-    DecoratedSignature, Hash, HostFunction, InvokeContractArgs, InvokeHostFunctionOp, Limits,
-    Memo, MuxedAccount, Operation, OperationBody, Preconditions, ScAddress, ScSymbol, ScVal,
-    SequenceNumber, Signature, SignatureHint, SorobanTransactionData, Transaction,
-    TransactionEnvelope, TransactionExt, TransactionSignaturePayload,
+    AccountId, DecoratedSignature, Hash, HostFunction, InvokeContractArgs, InvokeHostFunctionOp,
+    Limits, Memo, MuxedAccount, Operation, OperationBody, Preconditions, PublicKey as XdrPublicKey,
+    ScAddress, ScSymbol, ScVal, SequenceNumber, Signature, SignatureHint, SorobanTransactionData,
+    Transaction, TransactionEnvelope, TransactionExt, TransactionSignaturePayload,
     TransactionSignaturePayloadTaggedTransaction, TransactionV1Envelope, Uint256, VecM, WriteXdr,
 };
 
@@ -200,10 +200,48 @@ impl SorobanService {
 
         const BASE_FEE_STROOPS: u32 = 100;
         let mut tx = build_invoke_contract_tx(&keeper_public, sequence, BASE_FEE_STROOPS, call)?;
+        self.apply_simulation(&mut tx, BASE_FEE_STROOPS).await?;
 
-        // 1. Simulate against current ledger state to obtain the resource
-        //    footprint & fee Soroban requires for this exact invocation.
-        let unsigned = envelope_base64(&tx, Vec::new())?;
+        // Sign with the keeper's own key and submit.
+        let signature = sign_payload(&tx, network_passphrase, &signing_key)?;
+        let signed = envelope_base64(&tx, vec![signature])?;
+
+        self.send_transaction(&signed).await
+    }
+
+    /// Build an *unsigned* contract invocation transaction sourced from
+    /// `source_account`, fully simulated (resource footprint + fee already
+    /// applied), ready to be returned to a client for signing.
+    ///
+    /// Used for actions that fundamentally require the acting party's own
+    /// signature — e.g. `release_escrow`/`refund_escrow`, whose `caller`
+    /// parameter is authorized with `caller.require_auth()` on-chain. A
+    /// keeper cannot sign on behalf of a beneficiary/depositor/arbiter it
+    /// doesn't hold the key for, so those actions must be client-signed
+    /// exactly like a regular payment, not keeper-executed.
+    pub async fn build_unsigned_invoke_tx(
+        &self,
+        stellar: &StellarService,
+        source_account: &str,
+        call: &ContractCallArgs,
+    ) -> AppResult<String> {
+        let account = stellar.get_account(source_account).await?;
+        let sequence: i64 = account
+            .sequence
+            .parse()
+            .map_err(|_| AppError::Internal(anyhow::anyhow!("Source account sequence was not numeric")))?;
+
+        const BASE_FEE_STROOPS: u32 = 100;
+        let mut tx = build_invoke_contract_tx(source_account, sequence, BASE_FEE_STROOPS, call)?;
+        self.apply_simulation(&mut tx, BASE_FEE_STROOPS).await?;
+
+        envelope_base64(&tx, Vec::new())
+    }
+
+    /// Simulate `tx` against current ledger state and apply the resulting
+    /// resource footprint + fee to it in place.
+    async fn apply_simulation(&self, tx: &mut Transaction, base_fee: u32) -> AppResult<()> {
+        let unsigned = envelope_base64(tx, Vec::new())?;
         let sim = self.simulate(&unsigned).await?;
         if let Some(err) = sim.error {
             return Err(AppError::SorobanError(err));
@@ -218,14 +256,17 @@ impl SorobanService {
         .map_err(|e| AppError::SorobanError(format!("invalid transactionData from simulation: {e}")))?;
 
         tx.ext = TransactionExt::V1(soroban_data);
-        tx.fee = BASE_FEE_STROOPS.saturating_add(sim.min_resource_fee.clamp(0, u32::MAX as i64) as u32);
-
-        // 2. Sign with the keeper's own key and submit.
-        let signature = sign_payload(&tx, network_passphrase, &signing_key)?;
-        let signed = envelope_base64(&tx, vec![signature])?;
-
-        self.send_transaction(&signed).await
+        tx.fee = base_fee.saturating_add(sim.min_resource_fee.clamp(0, u32::MAX as i64) as u32);
+        Ok(())
     }
+}
+
+/// Encode a `G...` Stellar address as an `ScVal::Address` contract argument.
+pub fn account_address_scval(address: &str) -> AppResult<ScVal> {
+    let pk = stellar_strkey::ed25519::PublicKey::from_string(address)
+        .map_err(|_| AppError::BadRequest("Invalid Stellar account address".into()))?;
+    let account_id = AccountId(XdrPublicKey::PublicKeyTypeEd25519(Uint256(pk.0)));
+    Ok(ScVal::Address(ScAddress::Account(account_id)))
 }
 
 /// Build the (unsigned) `Transaction` for invoking `call` from `source_account`,

@@ -6,7 +6,7 @@ use crate::{
         transaction::{CreateTransaction, TransactionStatus},
     },
     services::{
-        soroban::{ContractCallArgs, SorobanService},
+        soroban::{account_address_scval as soroban_account_scval, ContractCallArgs, SorobanService},
         stellar::StellarService,
         transaction::TransactionService,
     },
@@ -169,18 +169,28 @@ impl EscrowService {
         Ok(())
     }
 
-    /// Validate the action, then submit the corresponding on-chain contract
-    /// call via the keeper and update the escrow's recorded state.
-    pub async fn execute_action(
+    /// Validate the action and build an *unsigned* `release_escrow`/
+    /// `refund_escrow` invocation sourced from the caller's own account,
+    /// ready for the caller to sign client-side (Freighter) and post back
+    /// to [`Self::submit_signed_action`].
+    ///
+    /// This is client-signed rather than keeper-executed because the
+    /// contract's `release_escrow`/`refund_escrow` call
+    /// `caller.require_auth()` — the on-chain call only succeeds if the
+    /// *actual* beneficiary/depositor/arbiter signs it. A keeper (a service
+    /// account with its own key) cannot sign on behalf of any of those
+    /// parties, so unlike subscription execution (which uses a pre-granted
+    /// token allowance) there is no sound way to automate this action for
+    /// a party the keeper isn't itself.
+    pub async fn build_action_tx(
         &self,
         config: &Config,
         stellar: &StellarService,
         soroban: &SorobanService,
-        tx_service: &TransactionService,
         id: Uuid,
         action: EscrowAction,
         req: &EscrowActionRequest,
-    ) -> AppResult<Escrow> {
+    ) -> AppResult<String> {
         let escrow = self
             .get_by_id(id)
             .await?
@@ -188,21 +198,39 @@ impl EscrowService {
 
         self.authorize_action(&escrow, action, req)?;
 
-        let (contract_id, keeper_secret) =
-            match (&config.escrow_contract_id, &config.keeper_secret_key) {
-                (Some(c), Some(k)) => (c.clone(), k.clone()),
-                _ => {
-                    return Err(AppError::KeeperUnavailable(
-                        "ESCROW_CONTRACT_ID and KEEPER_SECRET_KEY must both be set".into(),
-                    ))
-                }
-            };
+        let contract_id = config.escrow_contract_id.clone().ok_or_else(|| {
+            AppError::KeeperUnavailable("ESCROW_CONTRACT_ID must be set".into())
+        })?;
 
         let call = ContractCallArgs {
             contract_id,
             function_name: action.function_name().to_string(),
-            args: vec![escrow_id_scval(&escrow)],
+            args: vec![
+                escrow_id_scval(&escrow),
+                soroban_account_scval(&req.account)?,
+            ],
         };
+
+        soroban
+            .build_unsigned_invoke_tx(stellar, &req.account, &call)
+            .await
+    }
+
+    /// Relay a client-signed `release_escrow`/`refund_escrow` envelope
+    /// (produced from [`Self::build_action_tx`]) and update the escrow's
+    /// recorded state once it lands.
+    pub async fn submit_signed_action(
+        &self,
+        soroban: &SorobanService,
+        tx_service: &TransactionService,
+        id: Uuid,
+        action: EscrowAction,
+        signed_xdr: &str,
+    ) -> AppResult<Escrow> {
+        let escrow = self
+            .get_by_id(id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Escrow".into()))?;
 
         let (from_account, to_account) = match action {
             EscrowAction::Release => (escrow.depositor_account.clone(), escrow.beneficiary_account.clone()),
@@ -223,16 +251,7 @@ impl EscrowService {
             })
             .await?;
 
-        let submission = soroban
-            .invoke_contract_via_keeper(
-                stellar,
-                &config.stellar_network_passphrase,
-                &keeper_secret,
-                &call,
-            )
-            .await;
-
-        match submission {
+        match soroban.send_transaction(signed_xdr).await {
             Ok(result) => {
                 tx_service
                     .update_status(
