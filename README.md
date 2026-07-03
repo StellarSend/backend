@@ -19,9 +19,15 @@ A production-quality Rust backend for **StellarSend** — a global money-transfe
    - [Transactions](#transactions)
    - [Accounts](#accounts)
    - [Rates](#rates)
-8. [Error Handling](#error-handling)
-9. [Deployment Guide](#deployment-guide)
-10. [Docker](#docker)
+8. [Differentiator Features](#differentiator-features)
+   - [Scheduled & recurring payments](#scheduled--recurring-payments)
+   - [Split / batch payments](#split--batch-payments)
+   - [Payment requests / invoicing](#payment-requests--invoicing)
+   - [Escrow / conditional transfers](#escrow--conditional-transfers)
+   - [Keeper design](#keeper-design)
+9. [Error Handling](#error-handling)
+10. [Deployment Guide](#deployment-guide)
+11. [Docker](#docker)
 
 ---
 
@@ -698,6 +704,67 @@ curl 'http://localhost:8080/api/rates?from=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335
   }
 }
 ```
+
+---
+
+## Differentiator Features
+
+These sit on top of the on-chain building blocks in [`StellarSend/contracts`](https://github.com/StellarSend/contracts) — this layer handles persistence, history, and (where a scheduled action is needed) submitting already-authorized on-chain calls. Every fund-moving path still follows the non-custodial pattern above: the client signs with its own wallet, and this backend either relays the signed XDR or, for subscriptions only, a keeper service account submits a call the payer pre-authorized on-chain.
+
+### Scheduled & recurring payments
+
+`migrations/006_add_subscriptions.sql` — mirrors `stellar_send::subscription`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/subscriptions` | Create a subscription record |
+| `GET` | `/api/subscriptions` | List the caller's subscriptions |
+| `GET` | `/api/subscriptions/:id` | Get one |
+| `POST` | `/api/subscriptions/:id/cancel` | Cancel |
+
+A background `tokio` task (toggle with `KEEPER_ENABLED`) — plus a manual `POST /api/keeper/run-subscriptions` trigger — finds subscriptions due for execution and submits `execute_subscription` via the keeper. A subscription is marked `failed` after 3 consecutive on-chain failures rather than retried forever.
+
+### Split / batch payments
+
+`migrations/009_add_batch_payments.sql` adds `batch_id`/`batch_index` to `transactions`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/payments/batch` | Relay one client-signed multi-recipient transaction; records one `transactions` row per leg |
+
+### Payment requests / invoicing
+
+`migrations/007_add_payment_requests.sql`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/payment-requests` | Create a request, returns a shareable id |
+| `GET` | `/api/payment-requests` | List the caller's requests |
+| `GET` | `/api/payment-requests/:id` | Public lookup (for the payer's UI) |
+| `POST` | `/api/payment-requests/:id/fulfill` | Fulfill (client-signed, same as a regular send) |
+| `POST` | `/api/payment-requests/:id/cancel` | Cancel |
+
+### Escrow / conditional transfers
+
+`migrations/008_add_escrows.sql`.
+
+| Method | Path | Notes |
+|---|---|---|
+| `POST` | `/api/escrows` | Record an escrow the client has funded via its own signed `create_escrow` call |
+| `GET` | `/api/escrows` | List escrows the caller is party to |
+| `GET` | `/api/escrows/:id` | Get one (open to depositor/beneficiary/arbiter — they may not all be StellarSend accounts) |
+| `POST` | `/api/escrows/:id/release/build` | Build an unsigned `release_escrow` invocation sourced from the caller's own account |
+| `POST` | `/api/escrows/:id/release` | Relay the caller's signed release envelope |
+| `POST` | `/api/escrows/:id/refund/build` | Build an unsigned `refund_escrow` invocation |
+| `POST` | `/api/escrows/:id/refund` | Relay the caller's signed refund envelope |
+
+**Why release/refund are client-signed, not keeper-executed:** the contract's `release_escrow`/`refund_escrow` require `caller.require_auth()` — only the actual beneficiary, depositor, or arbiter can authorize the call. A keeper service account can't sign on their behalf, so unlike subscriptions (which use a pre-granted token allowance) there's no sound way to automate this for a party the keeper isn't itself. The `/build` step returns an unsigned invocation for whichever party is acting to sign client-side, exactly like a regular payment.
+
+### Keeper design
+
+`src/services/soroban.rs` implements a genuine Soroban RPC client: it builds, simulates, signs (with the keeper's own ed25519 key, configured via `KEEPER_SECRET_KEY` — never a user's), and submits `invoke_host_function` calls. The keeper only ever pays its own network fee; it can't move user funds beyond what the contract itself, pre-authorized by the user on-chain, allows. Due subscriptions are selected with `FOR UPDATE SKIP LOCKED` so it's safe to run more than one backend instance.
+
+> **Known gap:** the contracts, backend, and frontend for these four features were built in parallel against a shared spec rather than a single locked API contract. The escrow release/refund auth model above has been reconciled and fixed, but endpoint payload casing and a few paths (e.g. exact batch/subscription URLs) may still need a pass to line up frontend and backend exactly — check `src/lib/api.ts` in the frontend repo against `src/routes/mod.rs` here before wiring up a new client.
 
 ---
 
