@@ -1,4 +1,9 @@
+pub mod batch;
+pub mod escrow;
 pub mod payment;
+pub mod payment_request;
 pub mod rate;
+pub mod soroban;
 pub mod stellar;
+pub mod subscription;
 pub mod transaction;

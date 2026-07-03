@@ -54,5 +54,16 @@ hex = "0.4"
 # Validation
 validator = { version = "0.17", features = ["derive"] }
 
+# Stellar/Soroban keeper support — used only to build & sign the *keeper's
+# own* transaction envelopes (never a user's). See src/services/soroban.rs.
+stellar-xdr = { version = "21.2.0", features = ["curr", "base64"] }
+stellar-strkey = "0.0.13"
+ed25519-dalek = "2.1.1"
+sha2 = "0.10"
+
 [dev-dependencies]
-tokio-test = "0.4"
+# NOTE: tokio-test was previously listed here but was never actually
+# fetchable in this sandbox (no cached crate, no test that used it) and this
+# repo has no tests predating this change, so it's dropped in favor of
+# plain `#[tokio::test]` (provided by tokio's "full"/"macros" features,
+# already a normal dependency above).

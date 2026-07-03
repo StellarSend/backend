@@ -58,6 +58,22 @@ async fn main() -> Result<()> {
 
     let state = Arc::new(AppState { pool, config: config.clone() });
 
+    // Spawn the keeper background loop: periodically scans for subscriptions
+    // that are due for execution and submits the on-chain
+    // `execute_subscription` call via the keeper service account. This is a
+    // plain tokio interval task — no external scheduler/queue — kept simple
+    // on purpose. It only runs if a keeper account and contract id are
+    // configured; the manual `/api/keeper/run-subscriptions` endpoint always
+    // works as a fallback trigger.
+    if config.keeper_enabled {
+        let keeper_state = state.clone();
+        tokio::spawn(async move {
+            run_keeper_loop(keeper_state).await;
+        });
+    } else {
+        tracing::info!("Keeper background loop disabled (KEEPER_ENABLED=false)");
+    }
+
     // Build CORS layer from config.
     let cors = middleware::cors::build_cors_layer(&config.allowed_origins);
 
@@ -95,4 +111,44 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Background keeper loop: every `keeper_poll_interval_secs`, look for
+/// subscriptions due for execution and submit the on-chain call for each.
+/// Errors (including "keeper not configured") are logged and the loop keeps
+/// running — a transient RPC/Horizon outage should not crash the server.
+async fn run_keeper_loop(state: Arc<AppState>) {
+    use services::{soroban::SorobanService, stellar::StellarService, subscription::SubscriptionService, transaction::TransactionService};
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+        state.config.keeper_poll_interval_secs.max(5),
+    ));
+
+    loop {
+        interval.tick().await;
+
+        let sub_svc = SubscriptionService::new(state.pool.clone());
+        let stellar = StellarService::new(&state.config.horizon_url);
+        let soroban = SorobanService::new(&state.config.soroban_rpc_url);
+        let tx_svc = TransactionService::new(state.pool.clone());
+
+        match sub_svc
+            .run_due_executions(&state.config, &stellar, &soroban, &tx_svc)
+            .await
+        {
+            Ok(summary) => {
+                if summary.considered > 0 {
+                    tracing::info!(
+                        executed = summary.executed,
+                        failed = summary.failed,
+                        considered = summary.considered,
+                        "Keeper pass complete"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Keeper pass failed");
+            }
+        }
+    }
 }

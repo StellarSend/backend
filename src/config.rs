@@ -22,6 +22,20 @@ pub struct Config {
     pub horizon_url: String,
     pub stellar_network_passphrase: String,
 
+    // Soroban / keeper — the keeper is a service account (not a user's
+    // wallet) that pays network fees and invokes public contract functions
+    // (execute_subscription, release_escrow, refund_escrow) once conditions
+    // are met on-chain. It never touches user funds or user keys.
+    pub soroban_rpc_url: String,
+    pub keeper_secret_key: Option<String>,
+    pub subscription_contract_id: Option<String>,
+    pub escrow_contract_id: Option<String>,
+    /// How often the background keeper loop scans for due work.
+    pub keeper_poll_interval_secs: u64,
+    /// Disable the background keeper loop (e.g. in tests, or when execution
+    /// is instead triggered via the manual /api/keeper/run endpoint).
+    pub keeper_enabled: bool,
+
     // Rates
     pub rate_cache_ttl_secs: u64,
 
@@ -81,6 +95,22 @@ impl Config {
         let stellar_network_passphrase = env::var("STELLAR_NETWORK_PASSPHRASE")
             .unwrap_or_else(|_| "Test SDF Network ; September 2015".into());
 
+        let soroban_rpc_url = env::var("SOROBAN_RPC_URL")
+            .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".into());
+
+        let keeper_secret_key = env::var("KEEPER_SECRET_KEY").ok();
+        let subscription_contract_id = env::var("SUBSCRIPTION_CONTRACT_ID").ok();
+        let escrow_contract_id = env::var("ESCROW_CONTRACT_ID").ok();
+
+        let keeper_poll_interval_secs = env::var("KEEPER_POLL_INTERVAL_SECS")
+            .unwrap_or_else(|_| "60".into())
+            .parse::<u64>()
+            .context("KEEPER_POLL_INTERVAL_SECS must be a valid u64")?;
+
+        let keeper_enabled = env::var("KEEPER_ENABLED")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+
         let rate_cache_ttl_secs = env::var("RATE_CACHE_TTL_SECS")
             .unwrap_or_else(|_| "60".into())
             .parse::<u64>()
@@ -114,6 +144,12 @@ impl Config {
             jwt_expiry_hours,
             horizon_url,
             stellar_network_passphrase,
+            soroban_rpc_url,
+            keeper_secret_key,
+            subscription_contract_id,
+            escrow_contract_id,
+            keeper_poll_interval_secs,
+            keeper_enabled,
             rate_cache_ttl_secs,
             allowed_origins,
             app_env,

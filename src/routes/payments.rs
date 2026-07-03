@@ -1,8 +1,14 @@
 use crate::{
     error::{AppError, AppResult},
     middleware::auth::AuthUser,
-    models::payment::{QuoteRequest, SendPaymentRequest},
-    services::{payment::PaymentService, stellar::StellarService, transaction::TransactionService},
+    models::{
+        batch_payment::SendBatchPaymentRequest,
+        payment::{QuoteRequest, SendPaymentRequest},
+    },
+    services::{
+        batch::BatchPaymentService, payment::PaymentService, stellar::StellarService,
+        transaction::TransactionService,
+    },
     AppState,
 };
 use axum::{
@@ -53,6 +59,30 @@ pub async fn send_payment(
     let result = payment_svc
         .execute_send(auth.user_id, &req, &tx_svc)
         .await?;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": result
+    })))
+}
+
+// ─── Batch / split ─────────────────────────────────────────────────────────────
+
+/// POST /api/payments/batch
+///
+/// Same non-custodial pattern as `/send`: the client builds and signs a
+/// single Stellar transaction with one payment operation per recipient
+/// (or a `send_batch_payment` Soroban call), then posts the signed XDR
+/// here. We relay it once and record one transaction row per leg.
+pub async fn send_batch_payment(
+    State(state): State<Arc<AppState>>,
+    auth: AuthUser,
+    Json(req): Json<SendBatchPaymentRequest>,
+) -> AppResult<Json<Value>> {
+    let stellar_svc = StellarService::new(&state.config.horizon_url);
+    let batch_svc = BatchPaymentService::new(state.pool.clone());
+
+    let result = batch_svc.execute_batch(auth.user_id, &stellar_svc, &req).await?;
 
     Ok(Json(json!({
         "success": true,

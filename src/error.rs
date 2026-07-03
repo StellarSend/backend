@@ -53,6 +53,15 @@ pub enum AppError {
     #[error("No payment path found between the requested assets")]
     NoPathFound,
 
+    #[error("{0} has expired")]
+    Expired(String),
+
+    #[error("Soroban RPC error: {0}")]
+    SorobanError(String),
+
+    #[error("Keeper is not configured: {0}")]
+    KeeperUnavailable(String),
+
     // ── Internal ────────────────────────────────────────────────────────────
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -97,6 +106,9 @@ impl AppError {
             Self::HorizonError(_) => (StatusCode::BAD_GATEWAY, "HORIZON_ERROR"),
             Self::TransactionFailed(_) => (StatusCode::UNPROCESSABLE_ENTITY, "TRANSACTION_FAILED"),
             Self::NoPathFound => (StatusCode::UNPROCESSABLE_ENTITY, "NO_PATH_FOUND"),
+            Self::Expired(_) => (StatusCode::GONE, "EXPIRED"),
+            Self::SorobanError(_) => (StatusCode::BAD_GATEWAY, "SOROBAN_ERROR"),
+            Self::KeeperUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "KEEPER_UNAVAILABLE"),
             Self::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "DATABASE_ERROR"),
             Self::HttpClient(_) => (StatusCode::BAD_GATEWAY, "HTTP_CLIENT_ERROR"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
