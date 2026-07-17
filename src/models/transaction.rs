@@ -9,6 +9,16 @@ use uuid::Uuid;
 pub enum TransactionStatus {
     Pending,
     Submitted,
+    /// Submission's outcome is unknown — Horizon never gave us a definitive
+    /// answer (client-side timeout, connection drop, or a crash before our
+    /// post-submission UPDATE committed). Distinct from `Failed`: the
+    /// transaction may still have landed on-chain, so it's never safe to
+    /// treat this the same as a definite rejection or let a caller blindly
+    /// retry. Resolved by `ReconciliationService` querying Horizon directly
+    /// by the pre-submission-computed hash (#30).
+    #[sqlx(rename = "submitted_unconfirmed")]
+    #[serde(rename = "submitted_unconfirmed")]
+    SubmittedUnconfirmed,
     Completed,
     Failed,
     Expired,
@@ -19,6 +29,7 @@ impl std::fmt::Display for TransactionStatus {
         match self {
             Self::Pending => write!(f, "pending"),
             Self::Submitted => write!(f, "submitted"),
+            Self::SubmittedUnconfirmed => write!(f, "submitted_unconfirmed"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
             Self::Expired => write!(f, "expired"),
