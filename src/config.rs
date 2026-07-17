@@ -36,6 +36,15 @@ pub struct Config {
     /// is instead triggered via the manual /api/keeper/run endpoint).
     pub keeper_enabled: bool,
 
+    // Batch payment reconciliation (#30) — recovers `transactions` rows
+    // stuck 'pending'/'submitted_unconfirmed' after a crash or an
+    // ambiguous submission timeout by checking Horizon directly.
+    /// How often the background reconciliation loop sweeps for stuck rows.
+    pub reconciliation_poll_interval_secs: u64,
+    /// How long a row must have been stuck before a sweep considers it
+    /// worth checking against Horizon.
+    pub reconciliation_stale_after_secs: i64,
+
     // Rates
     pub rate_cache_ttl_secs: u64,
 
@@ -111,6 +120,16 @@ impl Config {
             .map(|v| v != "false" && v != "0")
             .unwrap_or(true);
 
+        let reconciliation_poll_interval_secs = env::var("RECONCILIATION_POLL_INTERVAL_SECS")
+            .unwrap_or_else(|_| "30".into())
+            .parse::<u64>()
+            .context("RECONCILIATION_POLL_INTERVAL_SECS must be a valid u64")?;
+
+        let reconciliation_stale_after_secs = env::var("RECONCILIATION_STALE_AFTER_SECS")
+            .unwrap_or_else(|_| "60".into())
+            .parse::<i64>()
+            .context("RECONCILIATION_STALE_AFTER_SECS must be a valid i64")?;
+
         let rate_cache_ttl_secs = env::var("RATE_CACHE_TTL_SECS")
             .unwrap_or_else(|_| "60".into())
             .parse::<u64>()
@@ -150,6 +169,8 @@ impl Config {
             escrow_contract_id,
             keeper_poll_interval_secs,
             keeper_enabled,
+            reconciliation_poll_interval_secs,
+            reconciliation_stale_after_secs,
             rate_cache_ttl_secs,
             allowed_origins,
             app_env,

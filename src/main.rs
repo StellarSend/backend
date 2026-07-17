@@ -74,6 +74,20 @@ async fn main() -> Result<()> {
         tracing::info!("Keeper background loop disabled (KEEPER_ENABLED=false)");
     }
 
+    // Spawn the batch-reconciliation loop: periodically resolves
+    // transactions stuck 'pending'/'submitted_unconfirmed' by looking their
+    // precomputed hash up directly on Horizon (#30) — recovers from a crash
+    // between Horizon accepting a submission and our own status UPDATE
+    // committing, and from an ambiguous client-side submission timeout.
+    // Unlike the keeper loop this needs no optional credentials, so it
+    // always runs.
+    {
+        let reconciliation_state = state.clone();
+        tokio::spawn(async move {
+            run_batch_reconciliation_loop(reconciliation_state).await;
+        });
+    }
+
     // Build CORS layer from config.
     let cors = middleware::cors::build_cors_layer(&config.allowed_origins);
 
@@ -148,6 +162,47 @@ async fn run_keeper_loop(state: Arc<AppState>) {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Keeper pass failed");
+            }
+        }
+    }
+}
+
+/// Background reconciliation loop: every `reconciliation_poll_interval_secs`,
+/// resolve transactions stuck 'pending'/'submitted_unconfirmed' for longer
+/// than `reconciliation_stale_after_secs` by checking Horizon directly (#30).
+async fn run_batch_reconciliation_loop(state: Arc<AppState>) {
+    use services::{reconciliation::ReconciliationService, stellar::StellarService};
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+        state.config.reconciliation_poll_interval_secs.max(5),
+    ));
+
+    loop {
+        interval.tick().await;
+
+        let reconciliation_svc = ReconciliationService::new(state.pool.clone());
+        let stellar = StellarService::new(&state.config.horizon_url);
+
+        match reconciliation_svc
+            .reconcile_stuck_transactions(
+                &stellar,
+                chrono::Duration::seconds(state.config.reconciliation_stale_after_secs),
+            )
+            .await
+        {
+            Ok(summary) => {
+                if summary.considered > 0 {
+                    tracing::info!(
+                        considered = summary.considered,
+                        resolved_completed = summary.resolved_completed,
+                        resolved_failed = summary.resolved_failed,
+                        still_unconfirmed = summary.still_unconfirmed,
+                        "Batch reconciliation pass complete"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Batch reconciliation pass failed");
             }
         }
     }
