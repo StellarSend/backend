@@ -82,7 +82,14 @@ pub async fn send_batch_payment(
     let stellar_svc = StellarService::new(&state.config.horizon_url);
     let batch_svc = BatchPaymentService::new(state.pool.clone());
 
-    let result = batch_svc.execute_batch(auth.user_id, &stellar_svc, &req).await?;
+    let result = batch_svc
+        .execute_batch(
+            auth.user_id,
+            &stellar_svc,
+            &state.config.stellar_network_passphrase,
+            &req,
+        )
+        .await?;
 
     Ok(Json(json!({
         "success": true,

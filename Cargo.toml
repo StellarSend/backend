@@ -62,6 +62,7 @@ ed25519-dalek = "2.1.1"
 sha2 = "0.10"
 
 [dev-dependencies]
+wiremock = "0.6.5"
 # NOTE: tokio-test was previously listed here but was never actually
 # fetchable in this sandbox (no cached crate, no test that used it) and this
 # repo has no tests predating this change, so it's dropped in favor of
