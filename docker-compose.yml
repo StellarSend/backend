@@ -1,11 +1,9 @@
-version: "3.9"
 services:
   api:
     build: .
     ports: ["3000:3000"]
-    environment:
-      DATABASE_URL: postgres://stellarsend:password@db:5432/stellarsend
-      STELLAR_NETWORK: testnet
+    env_file:
+      - .env
     depends_on: [db]
   db:
     image: postgres:16-alpine
