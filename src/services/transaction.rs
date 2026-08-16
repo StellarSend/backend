@@ -69,9 +69,8 @@ impl TransactionService {
         user_id: Uuid,
         params: &TransactionListParams,
     ) -> AppResult<PaginatedTransactions> {
-        let page = params.page.unwrap_or(1).max(1);
-        let per_page = params.per_page.unwrap_or(20).clamp(1, 100);
-        let offset = (page - 1) * per_page;
+        let (page, per_page, offset) = compute_offset(params.page, params.per_page)?;
+
 
         // Build WHERE clauses dynamically.
         let mut conditions = vec!["user_id = $1".to_string()];
@@ -170,5 +169,39 @@ impl TransactionService {
         .ok_or_else(|| AppError::NotFound("Transaction".into()))?;
 
         Ok(row.into())
+    }
+}
+
+pub(crate) fn compute_offset(page: Option<u32>, per_page: Option<u32>) -> AppResult<(u32, u32, u32)> {
+    let page = page.unwrap_or(1).max(1);
+    let per_page = per_page.unwrap_or(20).clamp(1, 100);
+    let offset = page
+        .checked_sub(1)
+        .and_then(|p| p.checked_mul(per_page))
+        .ok_or_else(|| AppError::Validation("Page number is too large".to_string()))?;
+    Ok((page, per_page, offset))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_offset() {
+        // Normal cases
+        assert_eq!(compute_offset(Some(1), Some(20)).unwrap(), (1, 20, 0));
+        assert_eq!(compute_offset(Some(2), Some(20)).unwrap(), (2, 20, 20));
+        
+        // Edge cases
+        assert_eq!(compute_offset(None, None).unwrap(), (1, 20, 0));
+        assert_eq!(compute_offset(Some(0), Some(0)).unwrap(), (1, 1, 0));
+        
+        // Overflow cases
+        assert!(compute_offset(Some(u32::MAX), Some(100)).is_err());
+        assert!(compute_offset(Some(u32::MAX), Some(20)).is_err());
+        // 42949672 * 100 = 4294967200 < u32::MAX (4294967295)
+        assert_eq!(compute_offset(Some(42949673), Some(100)).unwrap(), (42949673, 100, 4294967200));
+        // 42949673 * 100 = 4294967300 > u32::MAX
+        assert!(compute_offset(Some(42949674), Some(100)).is_err());
     }
 }
