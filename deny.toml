@@ -1,0 +1,113 @@
+# cargo-deny configuration for StellarSend backend.
+#
+# This file is the single source of truth for Rust dependency supply-chain
+# auditing. It is consumed by `cargo deny` both locally and in CI — see
+# .github/workflows/deny.yml — and gates every dependency bump / PR on:
+#
+#   [advisories] known security advisories + maintenance status (RustSec db)
+#   [licenses]   acceptable license expressions (relevant for commercial/enterprise adoption)
+#   [bans]       duplicate / multiply-versioned dependencies
+#   [sources]    where a dependency may be fetched from
+#
+# Config syntax targets cargo-deny >= 0.20. Run locally:
+#   cargo install cargo-deny   (https://github.com/EmbarkStudios/cargo-deny)
+#   cargo deny check
+
+[advisories]
+# Since cargo-deny 0.20 every vulnerability/unsound/notice advisory is an error
+# unconditionally — there is nothing to configure for those. `unmaintained`
+# keeps failing for any crate in the tree, and yanked crates are errors too.
+yanked = "deny"
+unmaintained = "all"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temporarily ignored advisories (each with a tracked removal path).
+#
+# None of these entries are permanent. The list below is the residual output of
+# the initial audit pass (run 2026-08-16 against Cargo.lock) that cannot be
+# fixed without major-version upgrades to the crypto/TLS + DB stack. They all
+# clear when the following tracked follow-up lands:
+#
+#   Tracked follow-up: upgrade sqlx 0.7 -> 0.8 AND reqwest 0.11 -> 0.12 (which
+#   moves the TLS stack rustls 0.21 -> 0.22+/0.23, resolving the rustls-webpki
+#   and rustls-pemfile advisories, and drops the unmaintained paste that ships
+#   with sqlx-macros 0.7).
+#
+# Do NOT extend this list for new findings without a concrete removal plan.
+# `cargo deny check` warns about any entry here that no longer matches the tree
+# (unused-ignored-advisory), so the list self-reports when it can be pruned.
+# ─────────────────────────────────────────────────────────────────────────────
+ignore = [
+    # RUSTSEC-2024-0363 — sqlx: binary protocol misinterpretation via truncating
+    # casts on encoded values > 4 GiB (Postgres). Fixed in sqlx >= 0.8.1. This
+    # project pins sqlx 0.7 and uses its Type/FromRow derives across ~86 call
+    # sites; the 0.8 migration (Postgres enum handling etc.) is scoped out of
+    # this audit-gate PR. Exploitability is bounded here: only application-owned
+    # UUIDs/ids reach `bind()`, never > 4 GiB user-controlled values, and
+    # request bodies are size-bounded.
+    "RUSTSEC-2024-0363",
+
+    # RUSTSEC-2026-0098 / -0099 / -0104 — rustls-webpki 0.101.x name-constraint
+    # handling and a CRL-parsing panic, fixed in >= 0.103.12+. Pulled in
+    # transitively via the rustls 0.21 stack used by reqwest 0.11 and sqlx 0.7.
+    # Reaching them requires a fixed rustls line, i.e. the reqwest/sqlx major
+    # upgrades tracked above. The name-constraint bugs need certificate
+    # misissuance (reachable only after signature verification); the CRL panic
+    # needs CRL parsing, which this service never performs.
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+
+    # RUSTSEC-2024-0436 — `paste` is unmaintained (build-time proc-macro). No
+    # safe upgrade exists on the current line; it arrives via sqlx-macros and
+    # disappears with the sqlx 0.8 upgrade above. It is compile-time only and
+    # never ships in the runtime binary.
+    "RUSTSEC-2024-0436",
+
+    # RUSTSEC-2025-0134 — `rustls-pemfile` 0.x is unmaintained (the API has
+    # moved into rustls-pki-types). Resolved by the rustls >= 0.22 move tracked
+    # with RUSTSEC-2024-0363.
+    "RUSTSEC-2025-0134",
+]
+
+[licenses]
+# All licenses are denied unless explicitly allowed below (cargo-deny 0.20
+# removed the `default`/`copyleft` toggles — the allow list IS the policy).
+# GPL/AGPL are therefore rejected out of the box, which is the posture we want
+# for a financial application targeting commercial/enterprise adoption.
+#
+# The one deliberate exception is MPL-2.0 — a weak, file-level copyleft used by
+# `webpki-roots` (the rustls CA-root bundle load-bearing for reqwest/sqlx). It
+# is called out in a comment rather than buried.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # `webpki-roots` (CA root bundle) ships MPL-2.0 — required by the rustls stack.
+    "MPL-2.0",
+]
+
+[bans]
+# Duplicate dependency versions are flagged for review, not hard-failed: the
+# current tree legitimately carries coexisting major lines (syn 1/2, thiserror
+# 1/2, tower 0.4/0.5, base64 0.13/0.21/0.22, windows-sys 0.48/0.52/0.61) pushed
+# by the older/newer HTTP stacks that can only be unified by the tracked major
+# upgrades above. Keep an eye on `cargo deny check bans` output on every bump.
+multiple-versions = "warn"
+# Wildcard versions are always an error — never ship an unpinned dependency.
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+# Only the crates.io registry may supply dependencies — no private, git, or
+# undeclared registries, so a trojaned mirror can never silently inject code.
+unknown-registry = "deny"
+unknown-git = "deny"

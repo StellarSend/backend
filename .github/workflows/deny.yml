@@ -1,0 +1,40 @@
+name: Supply Chain Audit
+
+# Runs the RustSec advisory scanner + license / duplicate-version / source checks
+# against Cargo.lock on every push to main and every pull request. This is the
+# automated home for the cargo-deny configuration in deny.toml — see GrantFox/
+# StellarSend issue #53.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-deny:
+    name: cargo-deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          # Advisory scan is kept separate so it fails fast on CVEs without
+          # waiting on the (slower) full graph resolution.
+          - advisories
+          - bans licenses sources
+    env:
+      # The repo's rust-toolchain.toml requests an x86_64-apple-darwin target
+      # (for local macOS builds) that is irrelevant — and costly — to cargo-deny,
+      # which never compiles. Pin the runner's stable toolchain so the advisory
+      # job doesn't stall downloading an unused std lib.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny (${{ matrix.checks }})
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}

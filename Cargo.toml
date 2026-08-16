@@ -6,6 +6,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["StellarSend Team"]
 description = "Production-quality backend for StellarSend global money transfer app"
+license = "MIT"
 
 [[bin]]
 name = "stellarsend"
@@ -45,14 +46,9 @@ anyhow = "1"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-dotenv = "0.15"
-once_cell = "1"
+dotenvy = "0.15"
 tokio-util = { version = "0.7", features = ["full"] }
-base64 = "0.21"
 hex = "0.4"
-
-# Validation
-validator = { version = "0.17", features = ["derive"] }
 
 # Stellar/Soroban keeper support — used only to build & sign the *keeper's
 # own* transaction envelopes (never a user's). See src/services/soroban.rs.
