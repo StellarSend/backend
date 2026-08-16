@@ -32,6 +32,13 @@ impl EscrowAction {
     }
 }
 
+/// True if `error` is a Postgres unique/primary-key violation — used to
+/// detect a duplicate `onchain_escrow_id` (#56), mirroring the same pattern
+/// in `services::batch::is_unique_violation`.
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
+}
+
 pub struct EscrowService {
     pool: PgPool,
 }
@@ -86,7 +93,14 @@ impl EscrowService {
         .bind(&req.onchain_escrow_id)
         .bind(&req.funding_tx_hash)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                AppError::Conflict("An escrow with this onchain_escrow_id already exists".into())
+            } else {
+                e.into()
+            }
+        })?;
 
         Ok(row.into())
     }
