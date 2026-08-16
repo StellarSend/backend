@@ -34,6 +34,13 @@ pub struct KeeperRunSummary {
     pub considered: usize,
 }
 
+/// True if `error` is a Postgres unique/primary-key violation — used to
+/// detect a duplicate `onchain_subscription_id` (#56), mirroring the same
+/// pattern in `services::batch::is_unique_violation`.
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
+}
+
 pub struct SubscriptionService {
     pool: PgPool,
 }
@@ -95,7 +102,16 @@ impl SubscriptionService {
         .bind(next_execution_at)
         .bind(&req.onchain_subscription_id)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                AppError::Conflict(
+                    "A subscription with this onchain_subscription_id already exists".into(),
+                )
+            } else {
+                e.into()
+            }
+        })?;
 
         Ok(row.into())
     }
