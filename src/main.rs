@@ -29,7 +29,7 @@ pub struct AppState {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env if present (silently ignored if missing).
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     // Initialise structured logging.
     tracing_subscriber::fmt()
