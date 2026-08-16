@@ -34,6 +34,13 @@ pub struct KeeperRunSummary {
     pub considered: usize,
 }
 
+/// True if `error` is a Postgres unique/primary-key violation — used to
+/// detect a duplicate `onchain_subscription_id` (#56), mirroring the same
+/// pattern in `services::batch::is_unique_violation`.
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
+}
+
 pub struct SubscriptionService {
     pool: PgPool,
 }
@@ -95,7 +102,16 @@ impl SubscriptionService {
         .bind(next_execution_at)
         .bind(&req.onchain_subscription_id)
         .fetch_one(&self.pool)
-        .await?;
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                AppError::Conflict(
+                    "A subscription with this onchain_subscription_id already exists".into(),
+                )
+            } else {
+                e.into()
+            }
+        })?;
 
         Ok(row.into())
     }
@@ -406,5 +422,192 @@ mod tests {
             format_asset("USDC", &Some("GISSUER".into())),
             "USDC:GISSUER"
         );
+    }
+}
+
+/// End-to-end coverage requiring a real Postgres (`DATABASE_URL`) — see
+/// `reconciliation::db_tests` for why these live here as `#[ignore]`d
+/// `#[tokio::test]`s rather than in `tests/`. Run with
+/// `cargo test -- --ignored` against a real database. Covers #56's
+/// acceptance criteria for `subscriptions.onchain_subscription_id`.
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn test_pool() -> PgPool {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set to run this integration test");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("failed to connect to DATABASE_URL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("failed to run migrations");
+        pool
+    }
+
+    async fn seed_user(pool: &PgPool) -> Uuid {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Test User')",
+        )
+        .bind(user_id)
+        .bind(format!("{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("seed user insert should succeed");
+        user_id
+    }
+
+    async fn cleanup(pool: &PgPool, user_id: Uuid) {
+        let _ = sqlx::query("DELETE FROM subscriptions WHERE payer_id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+    }
+
+    fn sample_request(onchain_subscription_id: Option<String>) -> CreateSubscriptionRequest {
+        CreateSubscriptionRequest {
+            payer_account: "GPAYER".into(),
+            recipient_account: "GRECIPIENT".into(),
+            asset_code: "XLM".into(),
+            asset_issuer: None,
+            amount: "10".into(),
+            interval_seconds: 3600,
+            first_execution_at: None,
+            onchain_subscription_id,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn create_rejects_a_duplicate_onchain_subscription_id_with_conflict() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let service = SubscriptionService::new(pool.clone());
+        let onchain_id = format!("onchain-{}", Uuid::new_v4());
+
+        let first = service
+            .create(user_id, &sample_request(Some(onchain_id.clone())))
+            .await
+            .expect("first create with a fresh onchain_subscription_id should succeed");
+        assert_eq!(
+            first.onchain_subscription_id.as_deref(),
+            Some(onchain_id.as_str())
+        );
+
+        let second = service
+            .create(user_id, &sample_request(Some(onchain_id)))
+            .await;
+        assert!(
+            matches!(second, Err(AppError::Conflict(_))),
+            "expected Conflict, got {second:?}"
+        );
+
+        cleanup(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn create_allows_multiple_rows_with_no_onchain_subscription_id() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let service = SubscriptionService::new(pool.clone());
+
+        let first = service.create(user_id, &sample_request(None)).await;
+        let second = service.create(user_id, &sample_request(None)).await;
+
+        assert!(first.is_ok(), "expected first NULL-id create to succeed");
+        assert!(second.is_ok(), "expected second NULL-id create to succeed");
+
+        cleanup(&pool, user_id).await;
+    }
+
+    /// Informational, not a required fix in this issue: demonstrates *why*
+    /// the constraint needs to exist at the database layer rather than
+    /// relying on keeper-side detection. Temporarily drops the new unique
+    /// index (within a transaction that's always rolled back, so neither
+    /// the schema change nor the seeded rows ever persist) to reproduce the
+    /// pre-fix state, seeds two subscription rows sharing one
+    /// `onchain_subscription_id`, and confirms `run_due_executions`'s own
+    /// due-selection query — reproduced verbatim here rather than invoking
+    /// the full keeper path, which would need a live contract/Horizon setup
+    /// unrelated to what this test is demonstrating — selects both rows.
+    #[tokio::test]
+    #[ignore]
+    async fn pre_fix_duplicate_onchain_ids_would_both_be_selected_as_due() {
+        let pool = test_pool().await;
+        let mut tx = pool.begin().await.expect("begin transaction");
+
+        sqlx::query("DROP INDEX idx_subscriptions_onchain_id_unique")
+            .execute(&mut *tx)
+            .await
+            .expect("drop unique index (reproducing pre-fix schema)");
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Test User')",
+        )
+        .bind(user_id)
+        .bind(format!("{user_id}@example.test"))
+        .execute(&mut *tx)
+        .await
+        .expect("seed user insert should succeed");
+
+        let shared_onchain_id = "duplicate-onchain-id";
+        for _ in 0..2 {
+            sqlx::query(
+                r#"
+                INSERT INTO subscriptions (
+                    id, payer_id, payer_account, recipient_account, asset_code,
+                    amount, interval_seconds, next_execution_at, status,
+                    onchain_subscription_id
+                )
+                VALUES ($1, $2, 'GPAYER', 'GRECIPIENT', 'XLM', '10', 3600, NOW() - INTERVAL '1 minute', 'active', $3)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(user_id)
+            .bind(shared_onchain_id)
+            .execute(&mut *tx)
+            .await
+            .expect("seed duplicate-onchain-id subscription row should succeed without the constraint");
+        }
+
+        // The exact due-selection query from run_due_executions.
+        let due: Vec<SubscriptionRow> = sqlx::query_as(
+            r#"
+            SELECT * FROM subscriptions
+            WHERE status = 'active' AND next_execution_at <= NOW()
+            ORDER BY next_execution_at ASC
+            LIMIT $1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(KEEPER_BATCH_LIMIT)
+        .fetch_all(&mut *tx)
+        .await
+        .expect("due-selection query should succeed");
+
+        let matching = due
+            .iter()
+            .filter(|s| s.onchain_subscription_id.as_deref() == Some(shared_onchain_id))
+            .count();
+        assert_eq!(
+            matching, 2,
+            "both duplicate-onchain-id rows should be selected as due, motivating why #56's \
+             constraint needs to exist at the schema level"
+        );
+
+        // Never commits: the dropped index and seeded rows both vanish.
+        tx.rollback().await.expect("rollback should succeed");
     }
 }
