@@ -414,3 +414,112 @@ mod tests {
         assert!(matches!(err, AppError::Forbidden));
     }
 }
+
+/// End-to-end coverage requiring a real Postgres (`DATABASE_URL`) — see
+/// `reconciliation::db_tests` for why these live here as `#[ignore]`d
+/// `#[tokio::test]`s rather than in `tests/`. Run with
+/// `cargo test -- --ignored` against a real database. Covers #56's
+/// acceptance criteria for `escrows.onchain_escrow_id`.
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use chrono::Duration;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn test_pool() -> PgPool {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set to run this integration test");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("failed to connect to DATABASE_URL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("failed to run migrations");
+        pool
+    }
+
+    async fn seed_user(pool: &PgPool) -> Uuid {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Test User')",
+        )
+        .bind(user_id)
+        .bind(format!("{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("seed user insert should succeed");
+        user_id
+    }
+
+    async fn cleanup(pool: &PgPool, user_id: Uuid) {
+        let _ = sqlx::query("DELETE FROM escrows WHERE depositor_id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+    }
+
+    fn sample_request(onchain_escrow_id: Option<String>) -> CreateEscrowRequest {
+        CreateEscrowRequest {
+            depositor_account: "GDEPOSITOR".into(),
+            beneficiary_account: "GBENEFICIARY".into(),
+            asset_code: "XLM".into(),
+            asset_issuer: None,
+            amount: "10".into(),
+            unlock_time: Utc::now() + Duration::hours(1),
+            arbiter_account: None,
+            onchain_escrow_id,
+            funding_tx_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn create_rejects_a_duplicate_onchain_escrow_id_with_conflict() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let service = EscrowService::new(pool.clone());
+        let onchain_id = format!("onchain-{}", Uuid::new_v4());
+
+        let first = service
+            .create(user_id, &sample_request(Some(onchain_id.clone())))
+            .await
+            .expect("first create with a fresh onchain_escrow_id should succeed");
+        assert_eq!(
+            first.onchain_escrow_id.as_deref(),
+            Some(onchain_id.as_str())
+        );
+
+        let second = service
+            .create(user_id, &sample_request(Some(onchain_id)))
+            .await;
+        assert!(
+            matches!(second, Err(AppError::Conflict(_))),
+            "expected Conflict, got {second:?}"
+        );
+
+        cleanup(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn create_allows_multiple_rows_with_no_onchain_escrow_id() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let service = EscrowService::new(pool.clone());
+
+        let first = service.create(user_id, &sample_request(None)).await;
+        let second = service.create(user_id, &sample_request(None)).await;
+
+        assert!(first.is_ok(), "expected first NULL-id create to succeed");
+        assert!(second.is_ok(), "expected second NULL-id create to succeed");
+
+        cleanup(&pool, user_id).await;
+    }
+}
