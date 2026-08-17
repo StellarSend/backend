@@ -5,8 +5,42 @@ use crate::{
         TransactionRow, TransactionStatus,
     },
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use chrono::{DateTime, SecondsFormat, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// Encodes a `(created_at, id)` keyset-pagination cursor as an opaque
+/// base64 string. Microsecond precision matches Postgres `timestamptz`, so
+/// re-decoding round-trips exactly rather than losing precision the DB
+/// would then compare against.
+fn encode_cursor(created_at: DateTime<Utc>, id: Uuid) -> String {
+    let raw = format!(
+        "{}|{}",
+        created_at.to_rfc3339_opts(SecondsFormat::Micros, true),
+        id
+    );
+    URL_SAFE_NO_PAD.encode(raw)
+}
+
+/// Decodes a cursor produced by `encode_cursor`. Any malformed input
+/// (tampered, truncated, or simply not a cursor this service issued) is
+/// rejected as a client error rather than panicking or silently producing
+/// a wrong page.
+fn decode_cursor(cursor: &str) -> AppResult<(DateTime<Utc>, Uuid)> {
+    let invalid = || AppError::BadRequest("Invalid pagination cursor".to_string());
+
+    let raw = URL_SAFE_NO_PAD.decode(cursor).map_err(|_| invalid())?;
+    let raw = String::from_utf8(raw).map_err(|_| invalid())?;
+    let (created_at_str, id_str) = raw.split_once('|').ok_or_else(invalid)?;
+
+    let created_at = DateTime::parse_from_rfc3339(created_at_str)
+        .map_err(|_| invalid())?
+        .with_timezone(&Utc);
+    let id = Uuid::parse_str(id_str).map_err(|_| invalid())?;
+
+    Ok((created_at, id))
+}
 
 /// CRUD operations for the `transactions` table.
 pub struct TransactionService {
@@ -53,18 +87,37 @@ impl TransactionService {
     // ─── Read ─────────────────────────────────────────────────────────────────
 
     pub async fn get_by_id(&self, id: Uuid) -> AppResult<Option<Transaction>> {
-        let row = sqlx::query_as::<_, TransactionRow>(
-            "SELECT * FROM transactions WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query_as::<_, TransactionRow>("SELECT * FROM transactions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.map(Transaction::from))
     }
 
     /// List transactions for a specific user with optional filters and pagination.
+    ///
+    /// Defaults to cursor/keyset pagination (see `list_for_user_cursor`),
+    /// which never runs a `COUNT(*)`. Passing `page` opts into the legacy
+    /// offset-based mode (see `list_for_user_offset`) for existing
+    /// consumers during the transition — see #54.
     pub async fn list_for_user(
+        &self,
+        user_id: Uuid,
+        params: &TransactionListParams,
+    ) -> AppResult<PaginatedTransactions> {
+        if params.page.is_some() {
+            self.list_for_user_offset(user_id, params).await
+        } else {
+            self.list_for_user_cursor(user_id, params).await
+        }
+    }
+
+    /// Legacy `page`/`per_page` pagination: a full `COUNT(*)` plus an
+    /// `OFFSET`-skip on every request. O(offset) in Postgres and rescans
+    /// every matching row on every page — see #54. Kept only for backward
+    /// compatibility; new/updated callers should use the cursor mode.
+    async fn list_for_user_offset(
         &self,
         user_id: Uuid,
         params: &TransactionListParams,
@@ -132,10 +185,123 @@ impl TransactionService {
 
         Ok(PaginatedTransactions {
             items,
+            total: Some(total),
+            page: Some(page),
+            per_page,
+            total_pages: Some(total_pages),
+            next_cursor: None,
+        })
+    }
+
+    /// Cursor/keyset pagination: default mode, avoiding both the
+    /// `COUNT(*)` and the `OFFSET`-skip cost of `list_for_user_offset`.
+    /// Seeks from `(created_at, id)` rather than counting past N rows, so
+    /// cost is independent of how deep into the history the cursor is.
+    /// `(created_at, id)` (rather than `created_at` alone) breaks ties
+    /// between rows sharing an identical timestamp — real for batch-payment
+    /// legs inserted in the same transaction — without skipping or
+    /// duplicating rows across pages. See #54.
+    async fn list_for_user_cursor(
+        &self,
+        user_id: Uuid,
+        params: &TransactionListParams,
+    ) -> AppResult<PaginatedTransactions> {
+        let per_page = params.per_page.unwrap_or(20).clamp(1, 100);
+        let cursor = params.cursor.as_deref().map(decode_cursor).transpose()?;
+
+        // Filter conditions only, kept separate from the cursor predicate
+        // below so an opt-in `total` reflects everything matching the
+        // filters, not just what's left after the cursor position.
+        let mut filter_conditions = vec!["user_id = $1".to_string()];
+        let mut param_idx = 2usize;
+
+        if params.status.is_some() {
+            filter_conditions.push(format!("status = ${param_idx}"));
+            param_idx += 1;
+        }
+        if params.from_asset.is_some() {
+            filter_conditions.push(format!("from_asset = ${param_idx}"));
+            param_idx += 1;
+        }
+        if params.to_asset.is_some() {
+            filter_conditions.push(format!("to_asset = ${param_idx}"));
+            param_idx += 1;
+        }
+
+        let total = if params.include_total.unwrap_or(false) {
+            let count_sql = format!(
+                "SELECT COUNT(*) FROM transactions WHERE {}",
+                filter_conditions.join(" AND ")
+            );
+            let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql).bind(user_id);
+            if let Some(s) = &params.status {
+                count_query = count_query.bind(s);
+            }
+            if let Some(f) = &params.from_asset {
+                count_query = count_query.bind(f);
+            }
+            if let Some(t) = &params.to_asset {
+                count_query = count_query.bind(t);
+            }
+            Some(count_query.fetch_one(&self.pool).await?)
+        } else {
+            None
+        };
+
+        let mut data_conditions = filter_conditions;
+        let cursor_param_idx = param_idx;
+        if cursor.is_some() {
+            data_conditions.push(format!(
+                "(created_at, id) < (${cursor_param_idx}, ${})",
+                cursor_param_idx + 1
+            ));
+            param_idx += 2;
+        }
+
+        let limit_idx = param_idx;
+        let data_sql = format!(
+            "SELECT * FROM transactions WHERE {} ORDER BY created_at DESC, id DESC LIMIT ${limit_idx}",
+            data_conditions.join(" AND ")
+        );
+
+        let mut data_query = sqlx::query_as::<_, TransactionRow>(&data_sql).bind(user_id);
+        if let Some(s) = &params.status {
+            data_query = data_query.bind(s);
+        }
+        if let Some(f) = &params.from_asset {
+            data_query = data_query.bind(f);
+        }
+        if let Some(t) = &params.to_asset {
+            data_query = data_query.bind(t);
+        }
+        if let Some((created_at, id)) = cursor {
+            data_query = data_query.bind(created_at).bind(id);
+        }
+
+        // Fetch one extra row so a next page can be detected without a
+        // separate COUNT(*).
+        let mut rows = data_query
+            .bind(per_page as i64 + 1)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let next_cursor = if rows.len() > per_page as usize {
+            rows.truncate(per_page as usize);
+            rows.last().map(|r| encode_cursor(r.created_at, r.id))
+        } else {
+            None
+        };
+
+        let items: Vec<Transaction> = rows.into_iter().map(Transaction::from).collect();
+        let total_pages = total.map(|t| ((t as f64) / (per_page as f64)).ceil() as u32);
+
+        Ok(PaginatedTransactions {
+            items,
             total,
-            page,
+            page: None,
             per_page,
             total_pages,
+            next_cursor,
         })
     }
 
