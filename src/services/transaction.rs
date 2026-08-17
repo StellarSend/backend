@@ -338,3 +338,52 @@ impl TransactionService {
         Ok(row.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_cursor_round_trips_through_encode_cursor() {
+        let created_at = Utc::now();
+        let id = Uuid::new_v4();
+
+        let cursor = encode_cursor(created_at, id);
+        let (decoded_created_at, decoded_id) =
+            decode_cursor(&cursor).expect("a cursor we just encoded should decode");
+
+        // Round-tripped through microsecond-precision RFC3339 text, so
+        // compare at that precision rather than requiring bit-identical
+        // DateTime<Utc> values.
+        assert_eq!(
+            decoded_created_at.timestamp_micros(),
+            created_at.timestamp_micros()
+        );
+        assert_eq!(decoded_id, id);
+    }
+
+    #[test]
+    fn decode_cursor_rejects_garbage_input() {
+        let err = decode_cursor("not-valid-base64!!!").unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn decode_cursor_rejects_base64_that_is_not_a_cursor_shape() {
+        // Valid base64, but the decoded text has no `|` separator.
+        let cursor = URL_SAFE_NO_PAD.encode("not-a-cursor");
+        let err = decode_cursor(&cursor).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn decode_cursor_rejects_an_invalid_uuid_half() {
+        let raw = format!(
+            "{}|not-a-uuid",
+            Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)
+        );
+        let cursor = URL_SAFE_NO_PAD.encode(raw);
+        let err = decode_cursor(&cursor).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+}
