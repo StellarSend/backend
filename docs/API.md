@@ -13,7 +13,11 @@ All protected endpoints require `Authorization: Bearer <jwt>`.
 ### Payments
 - `POST /send` — Submit a payment
 - `POST /payments/preview` — Preview fee breakdown
-- `GET /transactions/:address` — List payment history
+- `GET /transactions/:address` — List payment history. Paginated by
+  cursor (`cursor`/`next_cursor`) by default, avoiding a `COUNT(*)` on
+  every request; the legacy `page`/`per_page` mode is still supported
+  for existing consumers but costs a full `COUNT(*)` + `OFFSET` scan
+  per request (#54).
 
 ### Contacts
 - `GET /contacts` — List saved contacts
