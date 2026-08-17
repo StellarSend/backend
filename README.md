@@ -191,16 +191,35 @@ Copy `.env.example` to `.env` and adjust all values before running.
 
 ### Running migrations manually
 
+Migrations use sqlx's **reversible format** — every migration is a paired `NNN_name.up.sql` / `NNN_name.down.sql` file, so a bad migration can be undone with the tooling instead of a hand-written corrective script. (Existing `001`–`011` migrations were retrofitted to this format with their SQL payload **byte-for-byte unchanged**; because sqlx checksums a reversible migration over its `.up.sql` file alone, the checksums already recorded in any live database are preserved and nothing needs reconciling.)
+
 ```bash
 # Apply all pending migrations
 sqlx migrate run --database-url "$DATABASE_URL"
 
-# Roll back the last migration
+# Roll back the last applied migration
 sqlx migrate revert --database-url "$DATABASE_URL"
 
 # Check migration status
 sqlx migrate info --database-url "$DATABASE_URL"
 ```
+
+To add a new migration, generate the pair (no-op scripts you then fill in):
+
+```bash
+sqlx migrate add -r <description>
+# creates NNN_<description>.up.sql and NNN_<description>.down.sql in ./migrations
+```
+
+`revert` steps one migration back at a time; use `--target-version <N>` to roll back to a specific version (or `--target-version 0` to revert everything) — see `sqlx migrate revert --help`.
+
+> **Migration 010 is not fully revertible.** Its `ALTER TYPE transaction_status ADD VALUE 'submitted_unconfirmed'` cannot be undone — Postgres has no `ALTER TYPE … DROP VALUE`. Its `.down.sql` reverts the reversible parts and carries a full operator runbook for undoing the enum value (a create-new-type / migrate-columns / swap procedure); see the header of `migrations/010_batch_reconciliation.down.sql`.
+
+> **Smoke test.** `scripts/migrate-revert-smoke.sh` applies every migration to a fresh database, reverts `011 → 010 → 009`, asserts the schema matches the pre-migration state at each step, re-applies, and tears down. It runs in CI on every PR (`.github/workflows/migrations.yml`) and locally via:
+>
+> ```bash
+> BASE_URL=postgres://user:pass@localhost:5432 bash scripts/migrate-revert-smoke.sh
+> ```
 
 ---
 
