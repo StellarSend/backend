@@ -1,0 +1,48 @@
+name: Migration revert smoke test
+
+# Proves the reversible-migration tooling from issue #58 actually works:
+# applies every migration to a fresh disposable Postgres, reverts the
+# newest migrations, and asserts the schema returns to the pre-migration
+# state (see scripts/migrate-revert-smoke.sh). Scoped to migrations only —
+# general build/lint/test CI is tracked separately (issue #6).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: migrations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  migrate-revert-smoke:
+    name: migrate run + revert against fresh Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features rustls,postgres
+      - name: Install psql (for schema assertions)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Run the migration-revert smoke test
+        run: bash scripts/migrate-revert-smoke.sh
+        env:
+          BASE_URL: postgres://postgres:postgres@localhost:5432
