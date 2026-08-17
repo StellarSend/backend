@@ -387,3 +387,285 @@ mod tests {
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 }
+
+/// End-to-end coverage requiring a real Postgres (`DATABASE_URL`) — this
+/// crate is bin-only (no `src/lib.rs`), so these live here as `#[ignore]`d
+/// `#[tokio::test]`s rather than in `tests/`, following
+/// `escrow::db_tests`/`reconciliation::db_tests`. Run with
+/// `cargo test -- --ignored` against a real database. Covers #54's
+/// acceptance criteria: a full result set traversed via cursor comes back
+/// with no gaps or duplicates, including across rows sharing an identical
+/// `created_at`.
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use chrono::Duration;
+    use sqlx::postgres::PgPoolOptions;
+    use std::collections::HashSet;
+
+    async fn test_pool() -> PgPool {
+        let database_url = std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL must be set to run this integration test");
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("failed to connect to DATABASE_URL");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("failed to run migrations");
+        pool
+    }
+
+    async fn seed_user(pool: &PgPool) -> Uuid {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, full_name) VALUES ($1, $2, 'x', 'Test User')",
+        )
+        .bind(user_id)
+        .bind(format!("{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("seed user insert should succeed");
+        user_id
+    }
+
+    async fn seed_transaction(pool: &PgPool, user_id: Uuid, created_at: DateTime<Utc>) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO transactions (
+                id, user_id, from_asset, to_asset, send_amount,
+                source_account, destination_account, status,
+                created_at, updated_at
+            )
+            VALUES ($1, $2, 'XLM', 'USDC', '10', 'GSOURCE', 'GDEST', 'completed', $3, $3)
+            "#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("seed transaction insert should succeed");
+        id
+    }
+
+    async fn cleanup(pool: &PgPool, user_id: Uuid) {
+        let _ = sqlx::query("DELETE FROM transactions WHERE user_id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await;
+    }
+
+    /// Pages through every row for `user_id` via cursor mode, `per_page` at
+    /// a time, until `next_cursor` runs out. Returns the ids in the order
+    /// returned so callers can also assert on ordering, not just set
+    /// membership.
+    async fn collect_all_via_cursor(
+        svc: &TransactionService,
+        user_id: Uuid,
+        per_page: u32,
+    ) -> Vec<Uuid> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let params = TransactionListParams {
+                status: None,
+                from_asset: None,
+                to_asset: None,
+                page: None,
+                per_page: Some(per_page),
+                cursor: cursor.clone(),
+                include_total: None,
+            };
+            let page = svc
+                .list_for_user(user_id, &params)
+                .await
+                .expect("list_for_user should succeed");
+
+            assert!(
+                page.items.len() as u32 <= per_page,
+                "a single page must never return more than per_page rows"
+            );
+
+            all.extend(page.items.iter().map(|t| t.id));
+
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+
+            assert!(
+                all.len() < 10_000,
+                "cursor pagination did not terminate — likely a bug in the keyset predicate"
+            );
+        }
+
+        all
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn cursor_pagination_returns_full_set_with_no_gaps_or_duplicates() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let svc = TransactionService::new(pool.clone());
+
+        let base = Utc::now() - Duration::days(1);
+        let mut seeded = HashSet::new();
+        for i in 0..125 {
+            let id = seed_transaction(&pool, user_id, base + Duration::seconds(i)).await;
+            seeded.insert(id);
+        }
+
+        let collected = collect_all_via_cursor(&svc, user_id, 20).await;
+        let collected_set: HashSet<Uuid> = collected.iter().copied().collect();
+
+        assert_eq!(
+            collected.len(),
+            125,
+            "every seeded row should come back exactly once"
+        );
+        assert_eq!(
+            collected_set, seeded,
+            "no row should be skipped or duplicated"
+        );
+
+        cleanup(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn cursor_pagination_preserves_rows_sharing_an_identical_created_at() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let svc = TransactionService::new(pool.clone());
+
+        let base = Utc::now() - Duration::days(1);
+        let mut seeded = HashSet::new();
+
+        // Individual rows before the tied group.
+        for i in 0..9 {
+            let id = seed_transaction(&pool, user_id, base + Duration::seconds(i)).await;
+            seeded.insert(id);
+        }
+        // A block of rows sharing the exact same created_at, simulating
+        // batch-payment legs inserted within one transaction (#54).
+        let tied_at = base + Duration::seconds(9);
+        for _ in 0..12 {
+            let id = seed_transaction(&pool, user_id, tied_at).await;
+            seeded.insert(id);
+        }
+        // Individual rows after the tied group.
+        for i in 10..19 {
+            let id = seed_transaction(&pool, user_id, base + Duration::seconds(i)).await;
+            seeded.insert(id);
+        }
+
+        assert_eq!(seeded.len(), 30);
+
+        // per_page = 5 guarantees at least one page boundary falls inside
+        // the 12-row tied group.
+        let collected = collect_all_via_cursor(&svc, user_id, 5).await;
+        let collected_set: HashSet<Uuid> = collected.iter().copied().collect();
+
+        assert_eq!(
+            collected.len(),
+            30,
+            "every seeded row, tied or not, should come back exactly once"
+        );
+        assert_eq!(
+            collected_set, seeded,
+            "no row should be skipped or duplicated across the tie boundary"
+        );
+
+        cleanup(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn legacy_offset_pagination_still_returns_correct_total_and_items() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let svc = TransactionService::new(pool.clone());
+
+        let base = Utc::now() - Duration::days(1);
+        for i in 0..25 {
+            seed_transaction(&pool, user_id, base + Duration::seconds(i)).await;
+        }
+
+        let params = TransactionListParams {
+            status: None,
+            from_asset: None,
+            to_asset: None,
+            page: Some(1),
+            per_page: Some(10),
+            cursor: None,
+            include_total: None,
+        };
+        let page = svc
+            .list_for_user(user_id, &params)
+            .await
+            .expect("legacy list_for_user should succeed");
+
+        assert_eq!(page.items.len(), 10);
+        assert_eq!(page.total, Some(25));
+        assert_eq!(page.page, Some(1));
+        assert_eq!(page.total_pages, Some(3));
+        assert_eq!(page.next_cursor, None, "legacy mode never returns a cursor");
+
+        cleanup(&pool, user_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn cursor_mode_omits_total_unless_include_total_is_set() {
+        let pool = test_pool().await;
+        let user_id = seed_user(&pool).await;
+        let svc = TransactionService::new(pool.clone());
+
+        let base = Utc::now() - Duration::days(1);
+        for i in 0..5 {
+            seed_transaction(&pool, user_id, base + Duration::seconds(i)).await;
+        }
+
+        let default_params = TransactionListParams {
+            status: None,
+            from_asset: None,
+            to_asset: None,
+            page: None,
+            per_page: Some(20),
+            cursor: None,
+            include_total: None,
+        };
+        let default_page = svc
+            .list_for_user(user_id, &default_params)
+            .await
+            .expect("cursor list_for_user should succeed");
+        assert_eq!(
+            default_page.total, None,
+            "default cursor mode must not run a COUNT(*)"
+        );
+        assert_eq!(default_page.total_pages, None);
+
+        let with_total_params = TransactionListParams {
+            include_total: Some(true),
+            ..default_params
+        };
+        let with_total_page = svc
+            .list_for_user(user_id, &with_total_params)
+            .await
+            .expect("cursor list_for_user with include_total should succeed");
+        assert_eq!(with_total_page.total, Some(5));
+        assert_eq!(with_total_page.total_pages, Some(1));
+
+        cleanup(&pool, user_id).await;
+    }
+}
