@@ -18,14 +18,21 @@ use uuid::Uuid;
 /// GET /api/transactions
 ///
 /// Returns a paginated, optionally-filtered list of the authenticated user's
-/// transaction history.
+/// transaction history. Defaults to cheap cursor/keyset pagination; pass
+/// `page` to opt into the legacy, slower `COUNT(*)`+`OFFSET` mode instead
+/// (kept for backward compatibility — see #54).
 ///
 /// Query params:
-/// - `status`      – filter by status (pending | submitted | completed | failed | expired)
-/// - `from_asset`  – filter by source asset code
-/// - `to_asset`    – filter by destination asset code
-/// - `page`        – page number (default: 1)
-/// - `per_page`    – results per page (default: 20, max: 100)
+/// - `status`         – filter by status (pending | submitted | completed | failed | expired)
+/// - `from_asset`      – filter by source asset code
+/// - `to_asset`        – filter by destination asset code
+/// - `per_page`        – results per page (default: 20, max: 100)
+/// - `cursor`          – opaque cursor from a previous response's `next_cursor`;
+///                       omit for the first page. Ignored if `page` is set.
+/// - `include_total`   – `true` to also compute `total`/`total_pages` (an
+///                       extra `COUNT(*)`); always computed in legacy mode.
+/// - `page`            – legacy page number. Presence switches the whole
+///                       request to offset/COUNT(*) pagination.
 pub async fn list_transactions(
     State(state): State<Arc<AppState>>,
     auth: AuthUser,

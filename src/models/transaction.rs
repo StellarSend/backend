@@ -114,6 +114,17 @@ pub struct CreateTransaction {
 }
 
 /// Query parameters for listing transactions.
+///
+/// Two pagination modes:
+/// - **Cursor (default, cheap).** Pass `cursor` (opaque, from a previous
+///   response's `next_cursor`) or omit both `cursor` and `page` for the
+///   first page. Never runs a `COUNT(*)`.
+/// - **Legacy offset (`page`/`per_page`).** Pass `page` to keep the old
+///   page-number behavior, including its `COUNT(*)`-per-request cost. Kept
+///   for existing consumers during the transition — see README/API docs.
+///
+/// `include_total=true` opts either mode into also computing `total`/
+/// `total_pages` (always computed in legacy mode regardless of this flag).
 #[derive(Debug, Deserialize)]
 pub struct TransactionListParams {
     pub status: Option<TransactionStatus>,
@@ -121,14 +132,23 @@ pub struct TransactionListParams {
     pub to_asset: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
+    pub cursor: Option<String>,
+    pub include_total: Option<bool>,
 }
 
 /// Paginated response.
+///
+/// `total`/`page`/`total_pages` are `None` in cursor mode unless
+/// `include_total=true` was requested — computing them costs a full
+/// `COUNT(*)`, which cursor mode exists specifically to avoid by default.
+/// `next_cursor` is `None` in legacy offset mode and in cursor mode once
+/// the last page has been reached.
 #[derive(Debug, Serialize)]
 pub struct PaginatedTransactions {
     pub items: Vec<Transaction>,
-    pub total: i64,
-    pub page: u32,
+    pub total: Option<i64>,
+    pub page: Option<u32>,
     pub per_page: u32,
-    pub total_pages: u32,
+    pub total_pages: Option<u32>,
+    pub next_cursor: Option<String>,
 }

@@ -49,6 +49,10 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 tokio-util = { version = "0.7", features = ["full"] }
 hex = "0.4"
+# Opaque keyset-pagination cursor encoding (TransactionService::list_for_user,
+# #54). 0.22 is already present in Cargo.lock transitively (webpki-roots /
+# reqwest), so this adds no new dependency version to the tree.
+base64 = "0.22"
 
 # Stellar/Soroban keeper support — used only to build & sign the *keeper's
 # own* transaction envelopes (never a user's). See src/services/soroban.rs.
