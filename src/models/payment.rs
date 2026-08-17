@@ -74,7 +74,7 @@ pub struct QuoteResponse {
 ///
 /// The client builds and signs the Stellar transaction client-side, then
 /// submits the signed XDR envelope here for relay to Horizon.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SendPaymentRequest {
     /// The Stellar public key of the sending account.
     pub source_account: String,
