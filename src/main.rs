@@ -1,7 +1,10 @@
 #![allow(dead_code)] // Public API surface — fields and methods are used by callers
 use anyhow::Result;
 use sqlx::PgPool;
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{atomic::{AtomicI64, Ordering}, Arc},
+};
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     timeout::TimeoutLayer,
@@ -24,6 +27,49 @@ pub use config::Config;
 pub struct AppState {
     pub pool: PgPool,
     pub config: Config,
+    pub loop_health: BackgroundLoopHealth,
+}
+
+/// Last-successful-tick timestamps for the keeper and reconciliation
+/// background loops, queryable so an operator (or `/health`) can tell those
+/// loops are actually still alive rather than having silently stopped —
+/// the observability gap this issue leaves for #25 to build alerting on
+/// top of (#50). `0` means "never ticked yet"; real unix timestamps are far
+/// from `0`, so it's an unambiguous sentinel.
+#[derive(Default)]
+pub struct BackgroundLoopHealth {
+    keeper_last_tick_at: AtomicI64,
+    reconciliation_last_tick_at: AtomicI64,
+}
+
+impl BackgroundLoopHealth {
+    pub fn mark_keeper_ticked(&self) {
+        self.keeper_last_tick_at
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    pub fn mark_reconciliation_ticked(&self) {
+        self.reconciliation_last_tick_at
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    /// Unix timestamp of the keeper loop's last completed tick, or `None`
+    /// if it has never ticked (disabled, or not yet reached its first tick).
+    pub fn keeper_last_tick_at(&self) -> Option<i64> {
+        match self.keeper_last_tick_at.load(Ordering::Relaxed) {
+            0 => None,
+            ts => Some(ts),
+        }
+    }
+
+    /// Unix timestamp of the reconciliation loop's last completed tick, or
+    /// `None` if it has never ticked yet.
+    pub fn reconciliation_last_tick_at(&self) -> Option<i64> {
+        match self.reconciliation_last_tick_at.load(Ordering::Relaxed) {
+            0 => None,
+            ts => Some(ts),
+        }
+    }
 }
 
 #[tokio::main]
@@ -56,7 +102,11 @@ async fn main() -> Result<()> {
     let pool = db::create_pool(&config).await?;
     db::run_migrations(&pool).await?;
 
-    let state = Arc::new(AppState { pool, config: config.clone() });
+    let state = Arc::new(AppState {
+        pool,
+        config: config.clone(),
+        loop_health: BackgroundLoopHealth::default(),
+    });
 
     // Spawn the keeper background loop: periodically scans for subscriptions
     // that are due for execution and submits the on-chain
