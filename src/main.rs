@@ -305,4 +305,78 @@ mod tests {
         let join_err = result.expect_err("a panicking pass must return Err, not panic the caller");
         assert!(join_err.is_panic(), "JoinError must report the task panicked");
     }
+
+    // ── supervise_loop (#50) ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn supervise_loop_restarts_after_a_panicking_task() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let run_count = Arc::new(AtomicU32::new(0));
+        let already_panicked = Arc::new(AtomicBool::new(false));
+
+        let run_count_for_closure = run_count.clone();
+        let already_panicked_for_closure = already_panicked.clone();
+
+        let supervisor = tokio::spawn(supervise_loop(
+            "test-loop",
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_secs(60), // never resets backoff mid-test
+            move || {
+                let run_count = run_count_for_closure.clone();
+                let already_panicked = already_panicked_for_closure.clone();
+                async move {
+                    run_count.fetch_add(1, Ordering::SeqCst);
+                    if !already_panicked.swap(true, Ordering::SeqCst) {
+                        panic!("simulated panic on first run");
+                    }
+                    // Subsequent restarts behave like a real infinite loop.
+                    std::future::pending::<()>().await;
+                }
+            },
+        ));
+
+        // Give the supervisor time to: run once (panics), sleep out the
+        // (tiny, test-only) backoff, and restart.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        supervisor.abort();
+
+        assert!(
+            run_count.load(Ordering::SeqCst) >= 2,
+            "supervise_loop must restart the task after it panics, not leave it dead"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervise_loop_restarts_after_a_task_that_returns_normally() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let run_count = Arc::new(AtomicU32::new(0));
+        let run_count_for_closure = run_count.clone();
+
+        let supervisor = tokio::spawn(supervise_loop(
+            "test-loop-returns",
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(5),
+            std::time::Duration::from_secs(60),
+            move || {
+                let run_count = run_count_for_closure.clone();
+                async move {
+                    // A well-behaved infinite loop should never reach here,
+                    // but supervise_loop must still restart if it somehow
+                    // does — not treat "returned Ok" as "done supervising".
+                    run_count.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        supervisor.abort();
+
+        assert!(
+            run_count.load(Ordering::SeqCst) >= 2,
+            "supervise_loop must keep restarting a task that returns instead of running forever"
+        );
+    }
 }
