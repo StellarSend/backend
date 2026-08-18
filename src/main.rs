@@ -316,8 +316,6 @@ async fn run_keeper_loop(state: Arc<AppState>) {
 /// resolve transactions stuck 'pending'/'submitted_unconfirmed' for longer
 /// than `reconciliation_stale_after_secs` by checking Horizon directly (#30).
 async fn run_batch_reconciliation_loop(state: Arc<AppState>) {
-    use services::{reconciliation::ReconciliationService, stellar::StellarService};
-
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
         state.config.reconciliation_poll_interval_secs.max(5),
     ));
@@ -325,17 +323,28 @@ async fn run_batch_reconciliation_loop(state: Arc<AppState>) {
     loop {
         interval.tick().await;
 
-        let reconciliation_svc = ReconciliationService::new(state.pool.clone());
-        let stellar = StellarService::new(&state.config.horizon_url);
+        let pass_state = state.clone();
+        let pass_result = run_isolated_pass(async move {
+            use services::{reconciliation::ReconciliationService, stellar::StellarService};
 
-        match reconciliation_svc
-            .reconcile_stuck_transactions(
-                &stellar,
-                chrono::Duration::seconds(state.config.reconciliation_stale_after_secs),
-            )
-            .await
-        {
-            Ok(summary) => {
+            let reconciliation_svc = ReconciliationService::new(pass_state.pool.clone());
+            let stellar = StellarService::new(&pass_state.config.horizon_url);
+
+            // chrono::Duration::seconds panics on overflow near i64::MAX —
+            // exactly the kind of panic this isolation exists to survive.
+            reconciliation_svc
+                .reconcile_stuck_transactions(
+                    &stellar,
+                    chrono::Duration::seconds(pass_state.config.reconciliation_stale_after_secs),
+                )
+                .await
+        })
+        .await;
+
+        state.loop_health.mark_reconciliation_ticked();
+
+        match pass_result {
+            Ok(Ok(summary)) => {
                 if summary.considered > 0 {
                     tracing::info!(
                         considered = summary.considered,
@@ -346,8 +355,15 @@ async fn run_batch_reconciliation_loop(state: Arc<AppState>) {
                     );
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "Batch reconciliation pass failed");
+            }
+            Err(join_err) => {
+                tracing::error!(
+                    error = %join_err,
+                    panicked = join_err.is_panic(),
+                    "Batch reconciliation pass panicked — loop continues to next tick"
+                );
             }
         }
     }
