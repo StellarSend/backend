@@ -85,12 +85,24 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 }
 
 /// GET /health — lightweight liveness probe.
-async fn health_check() -> axum::Json<serde_json::Value> {
+///
+/// Includes each background loop's last-tick unix timestamp (`null` if it
+/// has never ticked — e.g. the keeper loop when `KEEPER_ENABLED=false`) so
+/// an operator can tell those loops are actually still alive, not just that
+/// the HTTP server is (#50) — the process staying up says nothing about
+/// whether the loops backing it are.
+async fn health_check(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "success": true,
         "data": {
             "status": "ok",
-            "service": "stellarsend-backend"
+            "service": "stellarsend-backend",
+            "background_loops": {
+                "keeper_last_tick_at": state.loop_health.keeper_last_tick_at(),
+                "reconciliation_last_tick_at": state.loop_health.reconciliation_last_tick_at(),
+            }
         }
     }))
 }
