@@ -25,7 +25,7 @@ tower-http = { version = "0.5", features = ["cors", "trace", "request-id", "time
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 
 # HTTP client
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

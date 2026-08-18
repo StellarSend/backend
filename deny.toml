@@ -33,6 +33,13 @@ unmaintained = "all"
 #   and rustls-pemfile advisories, and drops the unmaintained paste that ships
 #   with sqlx-macros 0.7).
 #
+#   Status: the reqwest 0.11 -> 0.12 half landed (#50) — it moved reqwest's own
+#   rustls stack to 0.23 and, as a direct fix, resolved the `h2` unbounded-
+#   empty-DATA-frames advisory (RUSTSEC-2026-0258) that was blocking CI. sqlx
+#   still pins its own, separate rustls 0.21 line (sqlx-core -> rustls-webpki
+#   0.101.x), so the four entries below remain genuinely unresolved until the
+#   sqlx 0.7 -> 0.8 half of this follow-up also lands.
+#
 # Do NOT extend this list for new findings without a concrete removal plan.
 # `cargo deny check` warns about any entry here that no longer matches the tree
 # (unused-ignored-advisory), so the list self-reports when it can be pruned.
@@ -76,9 +83,9 @@ ignore = [
 # GPL/AGPL are therefore rejected out of the box, which is the posture we want
 # for a financial application targeting commercial/enterprise adoption.
 #
-# The one deliberate exception is MPL-2.0 — a weak, file-level copyleft used by
-# `webpki-roots` (the rustls CA-root bundle load-bearing for reqwest/sqlx). It
-# is called out in a comment rather than buried.
+# Two deliberate exceptions, both for the same crate at different versions —
+# `webpki-roots`, the rustls CA-root bundle load-bearing for reqwest/sqlx —
+# called out in comments rather than buried:
 allow = [
     "MIT",
     "Apache-2.0",
@@ -91,8 +98,15 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
-    # `webpki-roots` (CA root bundle) ships MPL-2.0 — required by the rustls stack.
+    # webpki-roots 0.25.x (still pulled in by sqlx-core 0.7's own, separate
+    # rustls 0.21 line — see the advisories note above) ships MPL-2.0, a weak,
+    # file-level copyleft.
     "MPL-2.0",
+    # webpki-roots >= 0.26 (reqwest 0.12's rustls 0.23 line, landed in #50)
+    # relicensed the CA-root data itself to CDLA-Permissive-2.0 (Linux
+    # Foundation's Community Data License Agreement) — a permissive license
+    # for factual data, not code.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
