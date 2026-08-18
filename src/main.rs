@@ -255,8 +255,6 @@ async fn supervise_loop<F, Fut>(
 /// Errors (including "keeper not configured") are logged and the loop keeps
 /// running — a transient RPC/Horizon outage should not crash the server.
 async fn run_keeper_loop(state: Arc<AppState>) {
-    use services::{soroban::SorobanService, stellar::StellarService, subscription::SubscriptionService, transaction::TransactionService};
-
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
         state.config.keeper_poll_interval_secs.max(5),
     ));
@@ -264,16 +262,30 @@ async fn run_keeper_loop(state: Arc<AppState>) {
     loop {
         interval.tick().await;
 
-        let sub_svc = SubscriptionService::new(state.pool.clone());
-        let stellar = StellarService::new(&state.config.horizon_url);
-        let soroban = SorobanService::new(&state.config.soroban_rpc_url);
-        let tx_svc = TransactionService::new(state.pool.clone());
+        let pass_state = state.clone();
+        let pass_result = run_isolated_pass(async move {
+            use services::{
+                soroban::SorobanService, stellar::StellarService,
+                subscription::SubscriptionService, transaction::TransactionService,
+            };
 
-        match sub_svc
-            .run_due_executions(&state.config, &stellar, &soroban, &tx_svc)
-            .await
-        {
-            Ok(summary) => {
+            let sub_svc = SubscriptionService::new(pass_state.pool.clone());
+            let stellar = StellarService::new(&pass_state.config.horizon_url);
+            let soroban = SorobanService::new(&pass_state.config.soroban_rpc_url);
+            let tx_svc = TransactionService::new(pass_state.pool.clone());
+
+            sub_svc
+                .run_due_executions(&pass_state.config, &stellar, &soroban, &tx_svc)
+                .await
+        })
+        .await;
+
+        // Record the tick regardless of outcome — a caught panic still
+        // means the *loop* is alive, which is exactly what liveness proves.
+        state.loop_health.mark_keeper_ticked();
+
+        match pass_result {
+            Ok(Ok(summary)) => {
                 if summary.considered > 0 {
                     tracing::info!(
                         executed = summary.executed,
@@ -283,8 +295,18 @@ async fn run_keeper_loop(state: Arc<AppState>) {
                     );
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "Keeper pass failed");
+            }
+            Err(join_err) => {
+                // A panic anywhere inside the pass — logged through the same
+                // structured tracing pipeline as every other error, instead
+                // of a bare stderr backtrace outside the log stream (#50).
+                tracing::error!(
+                    error = %join_err,
+                    panicked = join_err.is_panic(),
+                    "Keeper pass panicked — loop continues to next tick"
+                );
             }
         }
     }
