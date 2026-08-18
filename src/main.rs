@@ -3,7 +3,10 @@ use anyhow::Result;
 use sqlx::PgPool;
 use std::{
     net::SocketAddr,
-    sync::{atomic::{AtomicI64, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicI64, Ordering},
+        Arc,
+    },
 };
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
@@ -414,7 +417,10 @@ mod tests {
         .await;
 
         let join_err = result.expect_err("a panicking pass must return Err, not panic the caller");
-        assert!(join_err.is_panic(), "JoinError must report the task panicked");
+        assert!(
+            join_err.is_panic(),
+            "JoinError must report the task panicked"
+        );
     }
 
     // ── supervise_loop (#50) ─────────────────────────────────────────────────
