@@ -142,6 +142,64 @@ where
     tokio::spawn(pass).await
 }
 
+/// Supervises a background loop task, restarting it with a capped
+/// exponential backoff if it ever terminates — whether by returning (which
+/// an infinite `loop {}` body should never do on its own) or by panicking
+/// outside whatever inner panic isolation it uses (#50). This is the outer,
+/// defense-in-depth layer; `run_isolated_pass` is the inner one that keeps
+/// most panics from ever reaching this far.
+///
+/// `spawn_task` is called once per (re)start to produce the future to run —
+/// a closure rather than a single future, since a consumed future can't be
+/// re-awaited after it resolves.
+///
+/// Backoff resets to `base_backoff` whenever a run lasts at least
+/// `backoff_reset_after`, so a single transient failure long in the past
+/// doesn't leave later, unrelated failures waiting out a maxed-out delay —
+/// only a *persistently* failing task should ever see delays climb toward
+/// `max_backoff`, per the issue's "don't spin the CPU" concern.
+async fn supervise_loop<F, Fut>(
+    name: &'static str,
+    base_backoff: std::time::Duration,
+    max_backoff: std::time::Duration,
+    backoff_reset_after: std::time::Duration,
+    mut spawn_task: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut backoff = base_backoff;
+
+    loop {
+        let started_at = std::time::Instant::now();
+        let handle = tokio::spawn(spawn_task());
+
+        match handle.await {
+            Ok(()) => {
+                tracing::error!(
+                    loop_name = name,
+                    "Background loop exited (should run forever) — restarting"
+                );
+            }
+            Err(join_err) => {
+                tracing::error!(
+                    loop_name = name,
+                    error = %join_err,
+                    panicked = join_err.is_panic(),
+                    "Background loop task terminated unexpectedly — restarting"
+                );
+            }
+        }
+
+        if started_at.elapsed() >= backoff_reset_after {
+            backoff = base_backoff;
+        }
+
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
 /// Background keeper loop: every `keeper_poll_interval_secs`, look for
 /// subscriptions due for execution and submit the on-chain call for each.
 /// Errors (including "keeper not configured") are logged and the loop keeps
