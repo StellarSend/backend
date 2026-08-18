@@ -490,4 +490,52 @@ mod tests {
             "supervise_loop must keep restarting a task that returns instead of running forever"
         );
     }
+
+    // ── end-to-end: a keeper-loop-shaped task survives a panic (#50) ────────
+
+    #[tokio::test]
+    async fn a_keeper_loop_style_task_survives_a_panicking_pass_and_keeps_ticking() {
+        // Mirrors run_keeper_loop's/run_batch_reconciliation_loop's actual
+        // shape — interval.tick() → an isolated pass → match on the result
+        // — without needing a live Postgres/Horizon connection, proving the
+        // *structure itself* (not just run_isolated_pass in isolation)
+        // survives a panic and keeps ticking, per this issue's acceptance
+        // criteria.
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let tick_count = Arc::new(AtomicU32::new(0));
+        let tick_count_for_loop = tick_count.clone();
+
+        let loop_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(5));
+            for _ in 0..5 {
+                interval.tick().await;
+                let n = tick_count_for_loop.fetch_add(1, Ordering::SeqCst);
+
+                let pass_result = run_isolated_pass(async move {
+                    if n == 1 {
+                        panic!("simulated panic on the second pass");
+                    }
+                })
+                .await;
+
+                if let Err(join_err) = pass_result {
+                    // In the real loops this becomes a tracing::error! and
+                    // the loop simply proceeds to its next tick, exactly as
+                    // it does here.
+                    assert!(join_err.is_panic());
+                }
+            }
+        });
+
+        loop_task
+            .await
+            .expect("the outer loop task itself must never panic");
+
+        assert_eq!(
+            tick_count.load(Ordering::SeqCst),
+            5,
+            "all 5 ticks must run even though the second pass panicked"
+        );
+    }
 }
