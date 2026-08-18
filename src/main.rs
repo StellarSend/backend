@@ -222,3 +222,29 @@ async fn run_batch_reconciliation_loop(state: Arc<AppState>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── run_isolated_pass (#50) ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn isolated_pass_success_returns_ok() {
+        let result = run_isolated_pass(async { 42 }).await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn isolated_pass_panic_is_caught_as_a_join_error_not_propagated() {
+        // The panic must surface as a value here, not unwind through this
+        // test — proving the caller's own task survives a panicking pass.
+        let result = run_isolated_pass(async {
+            panic!("simulated panic inside a background-loop pass");
+        })
+        .await;
+
+        let join_err = result.expect_err("a panicking pass must return Err, not panic the caller");
+        assert!(join_err.is_panic(), "JoinError must report the task panicked");
+    }
+}
