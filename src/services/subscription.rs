@@ -27,6 +27,11 @@ const MAX_CONSECUTIVE_FAILURES: i32 = 3;
 /// Max subscriptions processed per keeper pass, to bound worst-case latency.
 const KEEPER_BATCH_LIMIT: i64 = 50;
 
+/// Error text shared by `create` (rejecting a client-supplied interval) and
+/// the keeper-loop guard (marking a stored row with such an interval failed),
+/// so both call sites stay in lock-step (#51).
+const INTERVAL_OUT_OF_RANGE_MSG: &str = "interval_seconds is outside the supported range";
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct KeeperRunSummary {
     pub executed: usize,
@@ -69,15 +74,23 @@ impl SubscriptionService {
                 "interval_seconds must be positive".into(),
             ));
         }
+        // `Duration::seconds` panics once a value overflows chrono's internal
+        // millisecond representation (≈ i64::MAX / 1000), so bound the input
+        // with the fallible constructor rather than hardcoding that chrono
+        // implementation detail (#51). This also caps how far into the future
+        // a subscription is allowed to schedule.
+        let interval = ChronoDuration::try_seconds(req.interval_seconds)
+            .ok_or_else(|| AppError::Validation(INTERVAL_OUT_OF_RANGE_MSG.into()))?;
         if req.payer_account.trim().is_empty() || req.recipient_account.trim().is_empty() {
             return Err(AppError::Validation(
                 "payer_account and recipient_account are required".into(),
             ));
         }
 
-        let next_execution_at = req
-            .first_execution_at
-            .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(req.interval_seconds));
+        let next_execution_at = match req.first_execution_at {
+            Some(at) => at,
+            None => Utc::now() + interval,
+        };
 
         let id = Uuid::new_v4();
         let row = sqlx::query_as::<_, SubscriptionRow>(
@@ -233,6 +246,35 @@ impl SubscriptionService {
         summary.considered = due.len();
 
         for sub in due {
+            // Defense in depth: a stored interval that overflows chrono's
+            // internal millisecond representation (e.g. a row inserted
+            // directly into the DB, bypassing create-time validation) can
+            // never be rescheduled. `Duration::seconds` would panic here —
+            // inside the keeper loop's spawned task — and silently take down
+            // scheduling for every subscription, so bound it with the fallible
+            // constructor and mark the corrupt row terminal so it stops being
+            // selected as due each pass (#51).
+            let interval = match ChronoDuration::try_seconds(sub.interval_seconds) {
+                Some(interval) => interval,
+                None => {
+                    sqlx::query(
+                        r#"
+                        UPDATE subscriptions
+                        SET status = 'failed',
+                            last_error = $2,
+                            updated_at = NOW()
+                        WHERE id = $1
+                        "#,
+                    )
+                    .bind(sub.id)
+                    .bind(INTERVAL_OUT_OF_RANGE_MSG)
+                    .execute(&self.pool)
+                    .await?;
+                    summary.failed += 1;
+                    continue;
+                }
+            };
+
             let call = ContractCallArgs {
                 contract_id: contract_id.clone(),
                 function_name: "execute_subscription".to_string(),
@@ -276,8 +318,7 @@ impl SubscriptionService {
                         )
                         .await?;
 
-                    let next_execution_at =
-                        Utc::now() + ChronoDuration::seconds(sub.interval_seconds);
+                    let next_execution_at = Utc::now() + interval;
 
                     sqlx::query(
                         r#"
@@ -422,6 +463,46 @@ mod tests {
             format_asset("USDC", &Some("GISSUER".into())),
             "USDC:GISSUER"
         );
+    }
+
+    /// #51 regression: `interval_seconds` at or near `i64::MAX` previously
+    /// panicked inside `chrono::Duration::seconds` while computing the default
+    /// `next_execution_at`. All request validation happens before any DB
+    /// access, so a lazily-built pool that never dials a server is sufficient
+    /// to observe the clean `AppError::Validation` return. Every value here
+    /// would overflow chrono's internal representation regardless of the exact
+    /// boundary, so the test does not couple to chrono's implementation detail.
+    #[tokio::test]
+    async fn create_rejects_interval_seconds_that_overflow_duration() {
+        let pool = PgPool::connect_lazy("postgres://user:pass@localhost/db")
+            .expect("lazy pool construction should not require a live database");
+        let service = SubscriptionService::new(pool);
+
+        let extreme_values = [
+            i64::MAX,
+            i64::MAX - 1,
+            i64::MAX / 1000 + 1,
+            10_000_000_000_000_000,
+        ];
+        for interval_seconds in extreme_values {
+            let req = CreateSubscriptionRequest {
+                payer_account: "GPAYER".into(),
+                recipient_account: "GRECIPIENT".into(),
+                asset_code: "XLM".into(),
+                asset_issuer: None,
+                amount: "10".into(),
+                interval_seconds,
+                first_execution_at: None,
+                onchain_subscription_id: None,
+            };
+
+            let result = service.create(Uuid::new_v4(), &req).await;
+            assert!(
+                matches!(result, Err(AppError::Validation(_))),
+                "interval_seconds = {interval_seconds} should return AppError::Validation \
+                 instead of panicking, got {result:?}"
+            );
+        }
     }
 }
 
