@@ -115,11 +115,27 @@ async fn main() -> Result<()> {
     // on purpose. It only runs if a keeper account and contract id are
     // configured; the manual `/api/keeper/run-subscriptions` endpoint always
     // works as a fallback trigger.
+    // Backoff shared by both supervised loops: starts at 1s, doubles up to a
+    // 60s cap, and resets once a run has stayed up for 30s+ — so a single
+    // transient failure doesn't leave a much-later, unrelated failure
+    // waiting out a maxed-out delay, but a persistently-panicking pass still
+    // backs off instead of spinning the CPU (#50).
+    const LOOP_BASE_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+    const LOOP_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+    const LOOP_BACKOFF_RESET_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+
     if config.keeper_enabled {
         let keeper_state = state.clone();
-        tokio::spawn(async move {
-            run_keeper_loop(keeper_state).await;
-        });
+        tokio::spawn(supervise_loop(
+            "keeper",
+            LOOP_BASE_BACKOFF,
+            LOOP_MAX_BACKOFF,
+            LOOP_BACKOFF_RESET_AFTER,
+            move || {
+                let keeper_state = keeper_state.clone();
+                async move { run_keeper_loop(keeper_state).await }
+            },
+        ));
     } else {
         tracing::info!("Keeper background loop disabled (KEEPER_ENABLED=false)");
     }
@@ -133,9 +149,16 @@ async fn main() -> Result<()> {
     // always runs.
     {
         let reconciliation_state = state.clone();
-        tokio::spawn(async move {
-            run_batch_reconciliation_loop(reconciliation_state).await;
-        });
+        tokio::spawn(supervise_loop(
+            "batch-reconciliation",
+            LOOP_BASE_BACKOFF,
+            LOOP_MAX_BACKOFF,
+            LOOP_BACKOFF_RESET_AFTER,
+            move || {
+                let reconciliation_state = reconciliation_state.clone();
+                async move { run_batch_reconciliation_loop(reconciliation_state).await }
+            },
+        ));
     }
 
     // Build CORS layer from config.
