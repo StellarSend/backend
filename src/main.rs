@@ -127,6 +127,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Runs `pass` — a single unit of background-loop work — isolated inside its
+/// own tokio task, so a panic anywhere in `pass` (an `unwrap()`, an
+/// out-of-bounds index, a `chrono::Duration` overflow — anything) cannot
+/// bring down the caller's loop. Tokio already isolates a panicking task
+/// from the rest of the runtime; this just makes that isolation boundary
+/// explicit and gives the caller a `JoinError` to log through the
+/// structured `tracing` pipeline instead of losing the loop silently (#50).
+async fn run_isolated_pass<F, T>(pass: F) -> Result<T, tokio::task::JoinError>
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::spawn(pass).await
+}
+
 /// Background keeper loop: every `keeper_poll_interval_secs`, look for
 /// subscriptions due for execution and submit the on-chain call for each.
 /// Errors (including "keeper not configured") are logged and the loop keeps
