@@ -31,7 +31,11 @@ pub async fn get_quote(
     _auth: AuthUser,
     Json(req): Json<QuoteRequest>,
 ) -> AppResult<Json<Value>> {
-    let payment_svc = PaymentService::new(StellarService::new(&state.config.horizon_url));
+    let payment_svc = PaymentService::new(
+        StellarService::new(&state.config.horizon_url),
+        state.pool.clone(),
+        &state.config.stellar_network_passphrase,
+    );
     let quote = payment_svc.get_quote(&req).await?;
 
     Ok(Json(json!({
@@ -53,7 +57,11 @@ pub async fn send_payment(
     Json(req): Json<SendPaymentRequest>,
 ) -> AppResult<Json<Value>> {
     let stellar_svc = StellarService::new(&state.config.horizon_url);
-    let payment_svc = PaymentService::new(stellar_svc);
+    let payment_svc = PaymentService::new(
+        stellar_svc,
+        state.pool.clone(),
+        &state.config.stellar_network_passphrase,
+    );
     let tx_svc = TransactionService::new(state.pool.clone());
 
     let result = payment_svc
