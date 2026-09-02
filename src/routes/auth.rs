@@ -10,6 +10,12 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Fixed, precomputed bcrypt hash (cost factor 12) used when an email is not
+/// found or inactive during login (#38). This ensures constant-time-equivalent
+/// work is performed regardless of account existence, preventing user enumeration
+/// via observable timing discrepancies (CWE-208).
+const DUMMY_BCRYPT_HASH: &str = "$2a$12$e8Y6lRjP8Uu1h7W2S5j5/.qZ8f5pL1dE3n5N0O9Z7mX4kY2qV1W7K";
+
 // ─── Register ─────────────────────────────────────────────────────────────────
 
 /// POST /api/auth/register
@@ -96,16 +102,22 @@ pub async fn login(
             .fetch_optional(&state.pool)
             .await?;
 
-    let row = row.ok_or(AppError::InvalidCredentials)?;
+    // Mitigate timing discrepancies between existing and non-existing accounts (#38):
+    // always perform a bcrypt verification against either the user's password hash or
+    // a valid dummy hash so both code paths take equivalent wall-clock time.
+    let target_hash = match &row {
+        Some(user) => &user.password_hash,
+        None => DUMMY_BCRYPT_HASH,
+    };
 
-    // Verify password.
-    let valid = verify(req.password.as_bytes(), &row.password_hash).map_err(|e| {
+    let valid = verify(req.password.as_bytes(), target_hash).map_err(|e| {
         AppError::Internal(anyhow::anyhow!("bcrypt verify error: {e}"))
     })?;
 
-    if !valid {
-        return Err(AppError::InvalidCredentials);
-    }
+    let row = match row {
+        Some(user) if valid => user,
+        _ => return Err(AppError::InvalidCredentials),
+    };
 
     let user = User::from(row);
 
@@ -121,4 +133,17 @@ pub async fn login(
         "success": true,
         "data": AuthResponse { token, user }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dummy_bcrypt_hash_is_valid_format_and_rejects_passwords() {
+        assert!(
+            verify(b"any_arbitrary_password", DUMMY_BCRYPT_HASH).unwrap() == false,
+            "dummy hash must safely reject passwords and parse correctly without error"
+        );
+    }
 }
