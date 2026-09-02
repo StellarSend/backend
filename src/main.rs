@@ -31,6 +31,7 @@ pub struct AppState {
     pub pool: PgPool,
     pub config: Config,
     pub loop_health: BackgroundLoopHealth,
+    pub rate_service: services::rate::RateService,
 }
 
 /// Last-successful-tick timestamps for the keeper and reconciliation
@@ -105,10 +106,14 @@ async fn main() -> Result<()> {
     let pool = db::create_pool(&config).await?;
     db::run_migrations(&pool).await?;
 
+    let stellar_svc = services::stellar::StellarService::new(&config.horizon_url);
+    let rate_service = services::rate::RateService::new(stellar_svc, config.rate_cache_ttl_secs);
+
     let state = Arc::new(AppState {
         pool,
         config: config.clone(),
         loop_health: BackgroundLoopHealth::default(),
+        rate_service,
     });
 
     // Spawn the keeper background loop: periodically scans for subscriptions

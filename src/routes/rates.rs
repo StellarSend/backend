@@ -1,6 +1,5 @@
 use crate::{
     error::{AppError, AppResult},
-    services::{rate::RateService, stellar::StellarService},
     AppState,
 };
 use axum::{
@@ -26,8 +25,8 @@ pub struct RateQuery {
 /// GET /api/rates?from=USD&to=XLM
 ///
 /// Returns the current exchange rate between two Stellar assets by probing the
-/// Stellar DEX.  Results are cached server-side for `RATE_CACHE_TTL_SECS`.
-/// No authentication required — rates are public information.
+/// Stellar DEX. Results are cached server-side in `AppState::rate_service` for
+/// `RATE_CACHE_TTL_SECS`. No authentication required — rates are public information.
 pub async fn get_rate(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RateQuery>,
@@ -38,10 +37,7 @@ pub async fn get_rate(
         ));
     }
 
-    let stellar_svc = StellarService::new(&state.config.horizon_url);
-    let rate_svc = RateService::new(stellar_svc, state.config.rate_cache_ttl_secs);
-
-    let rate = rate_svc.fetch_rate(&params.from, &params.to).await?;
+    let rate = state.rate_service.fetch_rate(&params.from, &params.to).await?;
 
     Ok(Json(json!({
         "success": true,
