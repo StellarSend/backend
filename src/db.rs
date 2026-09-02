@@ -27,3 +27,10 @@ pub async fn run_migrations(pool: &PgPool) -> Result<()> {
     tracing::info!("Migrations complete");
     Ok(())
 }
+
+/// True if `error` is a PostgreSQL unique/primary-key constraint violation.
+/// Used across routes and services to gracefully handle insert races as `409 Conflict` (#55).
+pub fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
+}
+

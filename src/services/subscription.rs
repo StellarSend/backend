@@ -1,5 +1,6 @@
 use crate::{
     config::Config,
+    db::is_unique_violation,
     error::{AppError, AppResult},
     models::{
         subscription::{
@@ -34,16 +35,10 @@ pub struct KeeperRunSummary {
     pub considered: usize,
 }
 
-/// True if `error` is a Postgres unique/primary-key violation — used to
-/// detect a duplicate `onchain_subscription_id` (#56), mirroring the same
-/// pattern in `services::batch::is_unique_violation`.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
-}
-
 pub struct SubscriptionService {
     pool: PgPool,
 }
+
 
 impl SubscriptionService {
     pub fn new(pool: PgPool) -> Self {
