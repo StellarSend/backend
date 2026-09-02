@@ -157,3 +157,87 @@ fn parse_asset_code(code: &str) -> crate::models::payment::Asset {
         }
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    #[tokio::test]
+    async fn rate_service_caches_rates_within_ttl() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "_embedded": {
+                "records": [
+                    {
+                        "source_asset_type": "native",
+                        "source_amount": "1.0000000",
+                        "destination_asset_type": "credit_alphanum4",
+                        "destination_asset_code": "USDC",
+                        "destination_asset_issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+                        "destination_amount": "0.1250000",
+                        "path": []
+                    }
+                ]
+            }
+        });
+
+        // Mock Horizon /paths/strict-send endpoint expecting exactly 1 call
+        Mock::given(method("GET"))
+            .and(path("/paths/strict-send"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let stellar_svc = StellarService::new(&mock_server.uri());
+        let rate_svc = RateService::new(stellar_svc, 60);
+
+        // First call: hits mock server
+        let rate1 = rate_svc
+            .fetch_rate("XLM", "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN")
+            .await
+            .expect("fetch_rate should succeed");
+        assert_eq!(rate1.rate, 0.125);
+
+        // Second call: should hit in-memory cache and NOT hit mock server again
+        let rate2 = rate_svc
+            .fetch_rate("XLM", "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN")
+            .await
+            .expect("fetch_rate should succeed from cache");
+        assert_eq!(rate2.rate, 0.125);
+        assert_eq!(rate1.timestamp, rate2.timestamp);
+    }
+
+    #[tokio::test]
+    async fn rate_service_falls_back_when_dex_empty() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "_embedded": {
+                "records": []
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/paths/strict-send"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response_body))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let stellar_svc = StellarService::new(&mock_server.uri());
+        let rate_svc = RateService::new(stellar_svc, 60);
+
+        let rate = rate_svc
+            .fetch_rate("XLM", "USD")
+            .await
+            .expect("fetch_rate fallback should succeed");
+        assert_eq!(rate.rate, 0.11);
+    }
+}
