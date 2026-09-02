@@ -9,6 +9,8 @@ use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+pub const MAX_MEMO_BYTES: usize = 28;
+
 pub struct PaymentRequestService {
     pool: PgPool,
 }
@@ -18,13 +20,8 @@ impl PaymentRequestService {
         Self { pool }
     }
 
-    // ─── Create ───────────────────────────────────────────────────────────────
-
-    pub async fn create(
-        &self,
-        requester_id: Uuid,
-        req: &CreatePaymentRequestRequest,
-    ) -> AppResult<PaymentRequest> {
+    /// Validates the request fields prior to DB insertion.
+    pub fn validate_create_request(req: &CreatePaymentRequestRequest) -> AppResult<()> {
         let amount: f64 = req
             .amount
             .parse()
@@ -35,6 +32,25 @@ impl PaymentRequestService {
         if req.requester_account.trim().is_empty() {
             return Err(AppError::Validation("requester_account is required".into()));
         }
+        if let Some(memo) = &req.memo {
+            if memo.len() > MAX_MEMO_BYTES {
+                return Err(AppError::Validation(format!(
+                    "memo exceeds Stellar's 28-byte limit (got {} bytes)",
+                    memo.len()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    // ─── Create ───────────────────────────────────────────────────────────────
+
+    pub async fn create(
+        &self,
+        requester_id: Uuid,
+        req: &CreatePaymentRequestRequest,
+    ) -> AppResult<PaymentRequest> {
+        Self::validate_create_request(req)?;
 
         let expires_at = req
             .expires_in_secs
@@ -203,6 +219,59 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn sample_create_req(amount: &str, requester: &str, memo: Option<&str>) -> CreatePaymentRequestRequest {
+        CreatePaymentRequestRequest {
+            requester_account: requester.to_string(),
+            payer_account: None,
+            asset_code: "XLM".to_string(),
+            asset_issuer: None,
+            amount: amount.to_string(),
+            memo: memo.map(|s| s.to_string()),
+            expires_in_secs: None,
+        }
+    }
+
+    #[test]
+    fn test_memo_length_validation() {
+        // Valid: no memo
+        let req = sample_create_req("10.0", "GREQUESTER", None);
+        assert!(PaymentRequestService::validate_create_request(&req).is_ok());
+
+        // Valid: empty memo
+        let req = sample_create_req("10.0", "GREQUESTER", Some(""));
+        assert!(PaymentRequestService::validate_create_request(&req).is_ok());
+
+        // Valid: exactly 28 ASCII bytes
+        let memo_28_ascii = "1234567890123456789012345678";
+        assert_eq!(memo_28_ascii.len(), 28);
+        let req = sample_create_req("10.0", "GREQUESTER", Some(memo_28_ascii));
+        assert!(PaymentRequestService::validate_create_request(&req).is_ok());
+
+        // Invalid: 29 ASCII bytes
+        let memo_29_ascii = "12345678901234567890123456789";
+        assert_eq!(memo_29_ascii.len(), 29);
+        let req = sample_create_req("10.0", "GREQUESTER", Some(memo_29_ascii));
+        let err = PaymentRequestService::validate_create_request(&req).unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)));
+
+        // Multi-byte UTF-8 test:
+        // "🦀" is 1 char but 4 UTF-8 bytes.
+        // 7 crabs = 7 chars, exactly 28 bytes -> valid.
+        let memo_7_crabs = "🦀🦀🦀🦀🦀🦀🦀";
+        assert_eq!(memo_7_crabs.chars().count(), 7);
+        assert_eq!(memo_7_crabs.len(), 28);
+        let req = sample_create_req("10.0", "GREQUESTER", Some(memo_7_crabs));
+        assert!(PaymentRequestService::validate_create_request(&req).is_ok());
+
+        // 8 crabs = 8 chars, 32 bytes (> 28 bytes) -> must be rejected even though chars.count() is only 8
+        let memo_8_crabs = "🦀🦀🦀🦀🦀🦀🦀🦀";
+        assert_eq!(memo_8_crabs.chars().count(), 8);
+        assert_eq!(memo_8_crabs.len(), 32);
+        let req = sample_create_req("10.0", "GREQUESTER", Some(memo_8_crabs));
+        let err = PaymentRequestService::validate_create_request(&req).unwrap_err();
+        assert!(matches!(err, AppError::Validation(_)));
     }
 
     #[tokio::test]
