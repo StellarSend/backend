@@ -27,6 +27,10 @@ const MAX_CONSECUTIVE_FAILURES: i32 = 3;
 /// Max subscriptions processed per keeper pass, to bound worst-case latency.
 const KEEPER_BATCH_LIMIT: i64 = 50;
 
+/// Minimum allowed subscription interval in seconds (60s / 1 minute).
+/// Prevents rapid allowance draining and keeper spam (#47).
+pub const MIN_SUBSCRIPTION_INTERVAL_SECS: i64 = 60;
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct KeeperRunSummary {
     pub executed: usize,
@@ -64,10 +68,10 @@ impl SubscriptionService {
         if amount <= 0.0 {
             return Err(AppError::Validation("amount must be positive".into()));
         }
-        if req.interval_seconds <= 0 {
-            return Err(AppError::Validation(
-                "interval_seconds must be positive".into(),
-            ));
+        if req.interval_seconds < MIN_SUBSCRIPTION_INTERVAL_SECS {
+            return Err(AppError::Validation(format!(
+                "interval_seconds must be at least {MIN_SUBSCRIPTION_INTERVAL_SECS} seconds"
+            )));
         }
         if req.payer_account.trim().is_empty() || req.recipient_account.trim().is_empty() {
             return Err(AppError::Validation(
@@ -421,6 +425,14 @@ mod tests {
         assert_eq!(
             format_asset("USDC", &Some("GISSUER".into())),
             "USDC:GISSUER"
+        );
+    }
+
+    #[test]
+    fn min_subscription_interval_is_at_least_one_minute() {
+        assert!(
+            MIN_SUBSCRIPTION_INTERVAL_SECS >= 60,
+            "minimum subscription interval must be at least 60 seconds to protect allowances"
         );
     }
 }
