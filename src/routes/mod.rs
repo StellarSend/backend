@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod auth;
 pub mod escrows;
+pub mod health;
 pub mod keeper;
 pub mod payment_requests;
 pub mod payments;
@@ -20,6 +21,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         // ── Health ──────────────────────────────────────────────────────────
         .route("/health", get(health_check))
+        .route("/health/deep", get(health::health_deep))
         // ── Auth ────────────────────────────────────────────────────────────
         .route("/api/auth/register", post(auth::register))
         .route("/api/auth/login", post(auth::login))
