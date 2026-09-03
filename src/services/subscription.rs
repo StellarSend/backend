@@ -13,6 +13,7 @@ use crate::{
         stellar::StellarService,
         transaction::TransactionService,
     },
+    validation::validate_stellar_address,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use sqlx::PgPool;
@@ -69,11 +70,9 @@ impl SubscriptionService {
                 "interval_seconds must be positive".into(),
             ));
         }
-        if req.payer_account.trim().is_empty() || req.recipient_account.trim().is_empty() {
-            return Err(AppError::Validation(
-                "payer_account and recipient_account are required".into(),
-            ));
-        }
+        
+        validate_stellar_address(&req.payer_account)?;
+        validate_stellar_address(&req.recipient_account)?;
 
         let next_execution_at = req
             .first_execution_at

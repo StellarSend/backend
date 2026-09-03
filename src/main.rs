@@ -22,6 +22,7 @@ mod middleware;
 mod models;
 mod routes;
 mod services;
+pub mod validation;
 
 pub use config::Config;
 

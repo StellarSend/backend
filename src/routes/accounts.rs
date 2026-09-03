@@ -1,7 +1,8 @@
 use crate::{
-    error::{AppError, AppResult},
+    error::AppResult,
     middleware::auth::AuthUser,
     services::stellar::StellarService,
+    validation::validate_stellar_address,
     AppState,
 };
 use axum::{
@@ -56,22 +57,4 @@ pub async fn get_balances(
             "balances": balances
         }
     })))
-}
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Rudimentary Stellar address validation — must be 56 chars and start with G.
-fn validate_stellar_address(address: &str) -> AppResult<()> {
-    if address.len() != 56 || !address.starts_with('G') {
-        return Err(AppError::BadRequest(
-            "Invalid Stellar address: must be a 56-character G... public key".into(),
-        ));
-    }
-    // Ensure it's alphanumeric (base32).
-    if !address.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(AppError::BadRequest(
-            "Invalid Stellar address: contains non-base32 characters".into(),
-        ));
-    }
-    Ok(())
 }

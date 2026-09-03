@@ -10,6 +10,7 @@ use crate::{
         stellar::StellarService,
         transaction::TransactionService,
     },
+    validation::validate_stellar_address,
 };
 use chrono::Utc;
 use sqlx::PgPool;
@@ -58,11 +59,13 @@ impl EscrowService {
         if amount <= 0.0 {
             return Err(AppError::Validation("amount must be positive".into()));
         }
-        if req.depositor_account.trim().is_empty() || req.beneficiary_account.trim().is_empty() {
-            return Err(AppError::Validation(
-                "depositor_account and beneficiary_account are required".into(),
-            ));
+
+        validate_stellar_address(&req.depositor_account)?;
+        validate_stellar_address(&req.beneficiary_account)?;
+        if let Some(ref arbiter) = req.arbiter_account {
+            validate_stellar_address(arbiter)?;
         }
+
         if req.unlock_time <= Utc::now() {
             return Err(AppError::Validation(
                 "unlock_time must be in the future".into(),

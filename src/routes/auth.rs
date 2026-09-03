@@ -2,6 +2,7 @@ use crate::{
     error::{AppError, AppResult},
     middleware::auth::issue_jwt,
     models::user::{AuthResponse, CreateUserRequest, LoginRequest, User, UserRow},
+    validation::validate_stellar_address,
     AppState,
 };
 use axum::{extract::State, Json};
@@ -29,6 +30,11 @@ pub async fn register(
     }
     if req.full_name.trim().is_empty() {
         return Err(AppError::Validation("full_name is required".into()));
+    }
+
+    // Validate optional stellar address if provided.
+    if let Some(ref addr) = req.stellar_address {
+        validate_stellar_address(addr)?;
     }
 
     // Check uniqueness.
