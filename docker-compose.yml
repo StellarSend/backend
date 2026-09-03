@@ -4,7 +4,15 @@ services:
     ports: ["3000:3000"]
     env_file:
       - .env
-    depends_on: [db]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
   db:
     image: postgres:16-alpine
     environment:
@@ -12,5 +20,11 @@ services:
       POSTGRES_USER: stellarsend
       POSTGRES_PASSWORD: password
     volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stellarsend -d stellarsend"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 volumes:
   pgdata:
