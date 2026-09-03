@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::env;
 
 /// Central application configuration, loaded once at startup from environment variables.
@@ -151,6 +151,12 @@ impl Config {
             "production" | "prod" => AppEnv::Production,
             _ => AppEnv::Development,
         };
+
+        if app_env == AppEnv::Production
+            && (allowed_origins.is_empty() || allowed_origins.iter().any(|o| o == "*"))
+        {
+            bail!("ALLOWED_ORIGINS must be set to an explicit, non-wildcard list of origins in production");
+        }
 
         Ok(Self {
             port,
