@@ -1,0 +1,23 @@
+# Version control
+.git/
+.gitignore
+
+# Build artifacts (Rust)
+/target/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Docs
+*.md
+docs/
+
+# Docker files (non servono dentro il contesto di build)
+docker-compose.yml
+
+# Editor/OS cruft
+.vscode/
+.idea/
+.DS_Store
