@@ -125,7 +125,7 @@ cargo install cargo-watch
 cargo watch -x run
 ```
 
-The server binds to `http://0.0.0.0:8080` by default.
+The server binds to `http://0.0.0.0:3000` by default.
 
 ---
 
@@ -135,7 +135,7 @@ Copy `.env.example` to `.env` and adjust all values before running.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `8080` | HTTP listen port |
+| `PORT` | `3000` | HTTP listen port |
 | `HOST` | `0.0.0.0` | HTTP bind address |
 | `RUST_LOG` | `info` | Log level filter (`error`, `warn`, `info`, `debug`, `trace`) |
 | `DATABASE_URL` | — | PostgreSQL connection string (required) |
@@ -263,7 +263,7 @@ All responses share this envelope:
 Lightweight liveness probe.  No authentication required.
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:3000/health
 ```
 
 ```json
@@ -284,7 +284,7 @@ Create a new user account and receive a JWT.
 **Request**
 
 ```bash
-curl -X POST http://localhost:8080/api/auth/register \
+curl -X POST http://localhost:3000/api/auth/register \
   -H 'Content-Type: application/json' \
   -d '{
     "email": "alice@example.com",
@@ -329,7 +329,7 @@ Authenticate with email + password and receive a JWT.
 **Request**
 
 ```bash
-curl -X POST http://localhost:8080/api/auth/login \
+curl -X POST http://localhost:3000/api/auth/login \
   -H 'Content-Type: application/json' \
   -d '{
     "email": "alice@example.com",
@@ -375,7 +375,7 @@ Get the best path-payment quote from the Stellar DEX without committing anything
 **Request**
 
 ```bash
-curl -X POST http://localhost:8080/api/payments/quote \
+curl -X POST http://localhost:3000/api/payments/quote \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -428,7 +428,7 @@ Submit a **client-signed** Stellar transaction XDR.  The client is responsible f
 **Request**
 
 ```bash
-curl -X POST http://localhost:8080/api/payments/send \
+curl -X POST http://localhost:3000/api/payments/send \
   -H 'Authorization: Bearer <token>' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -471,7 +471,7 @@ curl -X POST http://localhost:8080/api/payments/send \
 Retrieve an internal payment record plus live Stellar data (when a hash is available).
 
 ```bash
-curl http://localhost:8080/api/payments/01920c1a-0000-7000-8000-000000000042 \
+curl http://localhost:3000/api/payments/01920c1a-0000-7000-8000-000000000042 \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -532,11 +532,11 @@ Return a paginated list of the authenticated user's transactions with optional f
 
 ```bash
 # All transactions, newest first
-curl 'http://localhost:8080/api/transactions' \
+curl 'http://localhost:3000/api/transactions' \
   -H 'Authorization: Bearer <token>'
 
 # Only completed, page 2
-curl 'http://localhost:8080/api/transactions?status=completed&page=2&per_page=10' \
+curl 'http://localhost:3000/api/transactions?status=completed&page=2&per_page=10' \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -562,7 +562,7 @@ curl 'http://localhost:8080/api/transactions?status=completed&page=2&per_page=10
 Retrieve a single transaction by its internal UUID.
 
 ```bash
-curl http://localhost:8080/api/transactions/01920c1a-0000-7000-8000-000000000042 \
+curl http://localhost:3000/api/transactions/01920c1a-0000-7000-8000-000000000042 \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -609,7 +609,7 @@ All account endpoints require `Authorization: Bearer <token>`.
 Fetch the full Horizon account record for a Stellar public key.
 
 ```bash
-curl http://localhost:8080/api/accounts/GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN \
+curl http://localhost:3000/api/accounts/GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -642,7 +642,7 @@ curl http://localhost:8080/api/accounts/GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKI
 Return only the balance array — useful for quick wallet display.
 
 ```bash
-curl http://localhost:8080/api/accounts/GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN/balances \
+curl http://localhost:3000/api/accounts/GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN/balances \
   -H 'Authorization: Bearer <token>'
 ```
 
@@ -685,10 +685,10 @@ Returns the current exchange rate between two assets, sourced from the Stellar D
 
 ```bash
 # XLM to USDC
-curl 'http://localhost:8080/api/rates?from=XLM&to=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
+curl 'http://localhost:3000/api/rates?from=XLM&to=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN'
 
 # USDC to XLM
-curl 'http://localhost:8080/api/rates?from=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN&to=XLM'
+curl 'http://localhost:3000/api/rates?from=USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN&to=XLM'
 ```
 
 **Response `200`**
@@ -842,35 +842,29 @@ Push to GitHub and link the repo in Railway.  Set the same env vars via the Rail
 
 ```dockerfile
 # ─── Build stage ──────────────────────────────────────────────────────────────
-FROM rust:1.75-slim-bookworm AS builder
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /app
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
-
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
-
+RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 RUN cargo build --release
 
 # ─── Runtime stage ────────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/stellarsend /usr/local/bin/
 
-WORKDIR /app
-COPY --from=builder /app/target/release/stellarsend /app/stellarsend
-COPY migrations ./migrations
+EXPOSE 3000
 
-EXPOSE 8080
-
-CMD ["/app/stellarsend"]
+CMD ["stellarsend"]
 ```
 
 ### docker-compose.yml (development)
 
 ```yaml
-version: "3.9"
 services:
   db:
     image: postgres:16-alpine
@@ -878,24 +872,30 @@ services:
       POSTGRES_USER: stellarsend
       POSTGRES_PASSWORD: password
       POSTGRES_DB: stellarsend
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stellarsend -d stellarsend"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   api:
     build: .
     ports:
-      - "8080:8080"
-    environment:
-      DATABASE_URL: postgres://stellarsend:password@db:5432/stellarsend
-      JWT_SECRET: dev-secret-change-in-production-must-be-32-chars-minimum
-      HORIZON_URL: https://horizon-testnet.stellar.org
-      STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015"
-      RUST_LOG: debug
-      APP_ENV: development
+      - "3000:3000"
+    env_file:
+      - .env
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   pgdata:
