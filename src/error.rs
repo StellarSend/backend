@@ -148,3 +148,27 @@ impl IntoResponse for AppError {
 
 /// Convenience result alias used throughout the codebase.
 pub type AppResult<T> = Result<T, AppError>;
+
+/// True if `error` is a Postgres unique/primary-key constraint violation.
+pub fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_conflict_status_and_code() {
+        let err = AppError::Conflict("Email".into());
+        let (status, code) = err.status_and_code();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(code, "CONFLICT");
+    }
+
+    #[test]
+    fn test_is_unique_violation_non_db_error() {
+        let err = sqlx::Error::RowNotFound;
+        assert!(!is_unique_violation(&err));
+    }
+}

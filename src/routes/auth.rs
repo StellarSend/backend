@@ -62,7 +62,14 @@ pub async fn register(
     .bind(req.full_name.trim())
     .bind(&req.stellar_address)
     .fetch_one(&state.pool)
-    .await?;
+    .await
+    .map_err(|e| {
+        if crate::error::is_unique_violation(&e) {
+            AppError::Conflict("Email".into())
+        } else {
+            AppError::Database(e)
+        }
+    })?;
 
     let user = User::from(row);
 

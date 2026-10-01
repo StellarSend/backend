@@ -1,5 +1,5 @@
 use crate::{
-    error::{AppError, AppResult},
+    error::{is_unique_violation, AppError, AppResult},
     models::{
         batch_payment::{BatchPaymentResult, SendBatchPaymentRequest},
         transaction::TransactionStatus,
@@ -15,12 +15,6 @@ use uuid::Uuid;
 /// built and signed the whole batch).
 pub struct BatchPaymentService {
     pool: PgPool,
-}
-
-/// True if `error` is a Postgres unique/primary-key violation — used to
-/// detect losing the race to claim a `batch_submissions` row.
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(db_err) if db_err.is_unique_violation())
 }
 
 /// Decides what a failed submission attempt means for transaction status
