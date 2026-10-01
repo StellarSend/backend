@@ -14,8 +14,26 @@ pub struct PaymentRequestService {
 }
 
 impl PaymentRequestService {
+    /// Maximum length of Stellar MEMO_TEXT in bytes (`stellar_xdr::curr::Memo::Text` / `StringM<28>`).
+    pub const MAX_MEMO_TEXT_BYTES: usize = 28;
+
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Validate that an optional memo does not exceed Stellar's 28-byte on-chain limit.
+    pub fn validate_memo(memo: Option<&str>) -> AppResult<()> {
+        if let Some(memo) = memo {
+            let byte_len = memo.as_bytes().len();
+            if byte_len > Self::MAX_MEMO_TEXT_BYTES {
+                return Err(AppError::Validation(format!(
+                    "memo length ({} bytes) exceeds Stellar MEMO_TEXT limit of {} bytes",
+                    byte_len,
+                    Self::MAX_MEMO_TEXT_BYTES
+                )));
+            }
+        }
+        Ok(())
     }
 
     // ─── Create ───────────────────────────────────────────────────────────────
@@ -35,6 +53,7 @@ impl PaymentRequestService {
         if req.requester_account.trim().is_empty() {
             return Err(AppError::Validation("requester_account is required".into()));
         }
+        Self::validate_memo(req.memo.as_deref())?;
 
         let expires_at = req
             .expires_in_secs
@@ -169,12 +188,12 @@ impl PaymentRequestService {
 
         match request.status {
             PaymentRequestStatus::Pending => Ok(()),
-            PaymentRequestStatus::Fulfilled => {
-                Err(AppError::Conflict("Payment request already fulfilled".into()))
-            }
-            PaymentRequestStatus::Cancelled => {
-                Err(AppError::Conflict("Payment request already cancelled".into()))
-            }
+            PaymentRequestStatus::Fulfilled => Err(AppError::Conflict(
+                "Payment request already fulfilled".into(),
+            )),
+            PaymentRequestStatus::Cancelled => Err(AppError::Conflict(
+                "Payment request already cancelled".into(),
+            )),
             PaymentRequestStatus::Expired => Err(AppError::Expired("Payment request".into())),
         }
     }
@@ -185,7 +204,10 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    fn sample_request(status: PaymentRequestStatus, expires_at: Option<chrono::DateTime<Utc>>) -> PaymentRequest {
+    fn sample_request(
+        status: PaymentRequestStatus,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> PaymentRequest {
         PaymentRequest {
             id: Uuid::new_v4(),
             requester_id: Uuid::new_v4(),
@@ -208,14 +230,20 @@ mod tests {
     #[tokio::test]
     async fn pending_unexpired_request_is_actionable() {
         let svc_check = PaymentRequestService { pool: dummy_pool() };
-        let req = sample_request(PaymentRequestStatus::Pending, Some(Utc::now() + Duration::hours(1)));
+        let req = sample_request(
+            PaymentRequestStatus::Pending,
+            Some(Utc::now() + Duration::hours(1)),
+        );
         assert!(svc_check.assert_actionable(&req).is_ok());
     }
 
     #[tokio::test]
     async fn expired_pending_request_is_rejected() {
         let svc_check = PaymentRequestService { pool: dummy_pool() };
-        let req = sample_request(PaymentRequestStatus::Pending, Some(Utc::now() - Duration::hours(1)));
+        let req = sample_request(
+            PaymentRequestStatus::Pending,
+            Some(Utc::now() - Duration::hours(1)),
+        );
         let err = svc_check.assert_actionable(&req).unwrap_err();
         assert!(matches!(err, AppError::Expired(_)));
     }
@@ -226,6 +254,59 @@ mod tests {
         let req = sample_request(PaymentRequestStatus::Fulfilled, None);
         let err = svc_check.assert_actionable(&req).unwrap_err();
         assert!(matches!(err, AppError::Conflict(_)));
+    }
+
+    #[test]
+    fn memo_at_exact_28_ascii_bytes_is_accepted() {
+        let memo = "1234567890123456789012345678";
+        assert_eq!(memo.as_bytes().len(), 28);
+        assert!(PaymentRequestService::validate_memo(Some(memo)).is_ok());
+    }
+
+    #[test]
+    fn memo_exceeding_28_ascii_bytes_is_rejected() {
+        let memo = "12345678901234567890123456789"; // 29 bytes
+        assert_eq!(memo.as_bytes().len(), 29);
+        let err = PaymentRequestService::validate_memo(Some(memo)).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("29 bytes"));
+                assert!(msg.contains("exceeds Stellar MEMO_TEXT limit of 28 bytes"));
+            }
+            other => panic!("expected AppError::Validation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn memo_multi_byte_utf8_exceeding_28_bytes_is_rejected() {
+        // '€' is 3 bytes in UTF-8. 10 euro symbols = 10 chars, but 30 bytes!
+        let multi_byte_memo = "€".repeat(10);
+        assert_eq!(multi_byte_memo.chars().count(), 10);
+        assert_eq!(multi_byte_memo.as_bytes().len(), 30);
+
+        let err = PaymentRequestService::validate_memo(Some(&multi_byte_memo)).unwrap_err();
+        match err {
+            AppError::Validation(msg) => {
+                assert!(msg.contains("30 bytes"));
+                assert!(msg.contains("exceeds Stellar MEMO_TEXT limit of 28 bytes"));
+            }
+            other => panic!("expected AppError::Validation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn memo_multi_byte_utf8_within_28_bytes_is_accepted() {
+        // '€' is 3 bytes in UTF-8. 9 euro symbols + 1 ASCII byte = 28 bytes total
+        let mut memo = "€".repeat(9); // 27 bytes
+        memo.push('A'); // + 1 byte = 28 bytes
+        assert_eq!(memo.as_bytes().len(), 28);
+        assert!(PaymentRequestService::validate_memo(Some(&memo)).is_ok());
+    }
+
+    #[test]
+    fn memo_none_and_empty_is_accepted() {
+        assert!(PaymentRequestService::validate_memo(None).is_ok());
+        assert!(PaymentRequestService::validate_memo(Some("")).is_ok());
     }
 
     /// A `PgPool` that is never actually connected to — fine because the
