@@ -1,0 +1,100 @@
+-- Migration 010 (down): Durable crash/timeout recovery for batch payments (#30)
+--
+-- ⚠️  THIS MIGRATION CANNOT BE CLEANLY REVERTED — read the runbook below.
+--
+-- What 010_batch_reconciliation.up.sql did:
+--
+--   1. `ALTER TABLE transactions DROP CONSTRAINT
+--      IF EXISTS transactions_stellar_tx_hash_key` — removed the UNIQUE
+--      constraint on `stellar_tx_hash`.
+--   2. Added a plain partial index `idx_transactions_stellar_tx_hash` —
+--      a no-op at runtime, because 002_add_indices already created an
+--      index with that exact name.
+--   3. `ALTER TYPE transaction_status ADD VALUE IF NOT EXISTS
+--      'submitted_unconfirmed'` — extended the enum with a new status.
+--   4. Created the `batch_submissions` table.
+--
+-- Why there is no clean inverse:
+--
+--   Item (3) is NOT reversible. PostgreSQL has no
+--   `ALTER TYPE ... DROP VALUE`: once a value has been added to an enum
+--   type, it can never be removed from that type by any single statement.
+--   The only way to remove it is to build a brand-new type, migrate every
+--   dependent column to it, and drop the old type (see the runbook below).
+--   Recording `submitted_unconfirmed` in the *database's* tracking of
+--   "migration 10 was applied" therefore cannot be undone by a reverse
+--   script — the value survives the revert, by design.
+--
+-- What this down script DOES restore:
+--
+--   - Drops the `batch_submissions` table.                     (reversible)
+--   - Restores the `transactions_stellar_tx_hash_key` UNIQUE
+--     constraint on `transactions.stellar_tx_hash`.            (conditional)
+--   - Leaves the `submitted_unconfirmed` enum value in place
+--     (unavoidable) and the `idx_transactions_stellar_tx_hash`
+--     index in place (owned by 002, not 010).                  (permanent)
+--
+-- The UNIQUE-restore step will FAIL LOUDLY if any `transactions` rows
+-- share a non-null `stellar_tx_hash` (which is exactly the batch case 010
+-- was built to support). That is intentional and safe: the whole revert
+-- runs in a transaction, so a constraint that cannot honestly hold aborts
+-- the revert rather than silently installing a lie.
+--
+-- ══════════════════════════════════════════════════════════════════════
+-- RUNBOOK — operator procedure for undoing this migration in production
+-- ══════════════════════════════════════════════════════════════════════
+--
+-- Desired end state: migration 010 treated as "not applied" AND the
+-- `submitted_unconfirmed` enum value gone from `transaction_status`.
+--
+--   1. Take an application maintenance window; a full revert touches the
+--      `transactions` table, which every payment write path uses.
+--   2. Ensure reconciliation is paused (stop the batch-reconciliation
+--      loop / scale the API to zero) so no new rows are written with
+--      status `submitted_unconfirmed` while you work.
+--   3. Run the revert (drop table + restore UNIQUE; the value stays):
+--         sqlx migrate revert --database-url "$DATABASE_URL"
+--      If restore of the UNIQUE constraint fails with a duplicate-key
+--      error, batch legs sharing a hash exist — decide business-side
+--      whether to keep them, then resolve the duplicates first.
+--   4. Remove the now-orphaned enum value. PostgreSQL cannot drop a value
+--      from an existing enum, so swap the type (Postgres 10+ only allows
+--      ADD VALUE inside a transaction block if the value is added to the
+--      NOT-nullable variety — the swap below is transaction-safe):
+--
+--         BEGIN;
+--         ALTER TYPE transaction_status RENAME TO transaction_status_old;
+--         CREATE TYPE transaction_status AS ENUM (
+--             'pending', 'submitted', 'completed', 'failed', 'expired'
+--         );  -- the pre-010 value list, without 'submitted_unconfirmed'
+--         ALTER TABLE transactions
+--             ALTER COLUMN status TYPE transaction_status
+--             USING status::text::transaction_status;
+--         DROP TYPE transaction_status_old;
+--         COMMIT;
+--
+--      The USING cast is required: enums are merely text labels, so
+--      `status::text` then a cast to the new type drops the orphan value
+--      from every row. Standard catalog queries that reference the label
+--      ('submitted_unconfirmed') via status::text no longer match — that
+--      is the signal you are done.
+--   5. If the swap is unattractive (e.g. you prefer to keep 010 applied
+--      and simply never emit the status), the simpler alternative is to
+--      do nothing here: an unused enum value is harmless. Decide whether
+--      the orphan label is acceptable before doing anything destructive.
+--
+-- Historical note: prior to this repo's reversible-format retrofit,
+-- migration 010's only "recovery" was a hand-written corrective script or
+-- a full restore from backup; this runbook is the tooling-backed minimum.
+
+DROP TABLE IF EXISTS batch_submissions;
+
+-- Restore the UNIQUE constraint 010 removed. Fails loudly — in a safe,
+-- transactional way — if duplicate non-null hashes exist (see above).
+ALTER TABLE transactions
+    ADD CONSTRAINT transactions_stellar_tx_hash_key
+    UNIQUE (stellar_tx_hash);
+
+-- NOT DROPPED HERE: idx_transactions_stellar_tx_hash (owned by 002).
+-- NOT DROPPED HERE: the 'submitted_unconfirmed' enum value — irreversible;
+--                    see the runbook above for the type-swap procedure.
